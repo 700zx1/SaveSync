@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Launch Faugus with SaveSync
+Exec=/home/$USER/Applications/savesync/faugus_with_savesync.sh
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Game;Utility;

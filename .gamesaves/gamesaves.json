@@ -1,0 +1,8 @@
+{
+    "Skyrim": {
+        "save_path": "~/SkyrimSaves"
+    },
+    "Red Dead 2": {
+        "save_path": "~/.wine/drive_c/users/you/Documents/RDR2/Profiles"
+    }
+}
