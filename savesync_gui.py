@@ -1,4 +1,3 @@
-
 import os
 import json
 import shutil
@@ -7,9 +6,9 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog
 from mega import Mega
 
-CONFIG_FILE = os.path.expanduser("~/.gamesaves/gamesaves.json")
-BACKUP_ROOT = os.path.expanduser("~/.gamesaves/backup/")
-LOG_FILE = os.path.expanduser("~/.gamesaves/savesync.log")
+CONFIG_FILE = os.path.expanduser("./.gamesaves/gamesaves.json")
+BACKUP_ROOT = os.path.expanduser("./.gamesaves/backup/")
+LOG_FILE = os.path.expanduser("./.gamesaves/savesync.log")
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
@@ -30,86 +29,122 @@ def folder_differs(folder1, folder2):
     return False
 
 def upload_to_mega(game_name, folder_path, log_callback):
-    creds_path = os.path.expanduser("~/.gamesaves/mega_credentials.json")
+    creds_path = os.path.expanduser("./.gamesaves/mega_credentials.json")
     if not os.path.exists(creds_path):
         log_callback("[!] MEGA credentials not found.")
         return
 
-    with open(creds_path) as f:
-        creds = json.load(f)
+    try:
+        with open(creds_path) as f:
+            creds = json.load(f)
 
-    mega = Mega()
-    m = mega.login(creds["email"], creds["password"])
+        mega = Mega()
+        m = mega.login(creds["email"], creds["password"])
 
-    cloud_base = m.find('SaveSync') or m.create_folder('SaveSync')
-    game_folder = m.find(f'SaveSync/{game_name}') or m.create_folder(game_name, parent=cloud_base)
+        # Ensure SaveSync root folder exists and get its node ID
+        cloud_base_id = m.find_path_descriptor('SaveSync')
+        if not cloud_base_id:
+            m.create_folder('SaveSync')
+            cloud_base_id = m.find_path_descriptor('SaveSync')
+        if not cloud_base_id:
+            log_callback("[!] Could not create or find 'SaveSync' folder on MEGA.")
+            return
 
-    for root, _, files in os.walk(folder_path):
-        rel_path = os.path.relpath(root, folder_path)
-        cloud_target = game_folder
-        if rel_path != ".":
-            cloud_target = m.create_folder(rel_path, parent=game_folder)
+        # Ensure game folder exists under SaveSync and get its node ID
+        game_folder_id = m.find_path_descriptor(f'SaveSync/{game_name}')
+        if not game_folder_id:
+            m.create_folder(game_name, dest=cloud_base_id)
+            game_folder_id = m.find_path_descriptor(f'SaveSync/{game_name}')
+        if not game_folder_id:
+            log_callback(f"[!] Could not create or find '{game_name}' folder on MEGA.")
+            return
 
-        for file in files:
-            local_file = os.path.join(root, file)
-            m.upload(local_file, dest=cloud_target)
-            log_callback(f"[↑] Uploaded {file} to MEGA:{game_name}/{rel_path}")
+        for root, _, files in os.walk(folder_path):
+            rel_path = os.path.relpath(root, folder_path)
+            cloud_target_id = game_folder_id
+            if rel_path != ".":
+                rel_unix = rel_path.replace(os.sep, "/")
+                target_path = f'SaveSync/{game_name}/{rel_unix}'
+                sub_id = m.find_path_descriptor(target_path)
+                if not sub_id:
+                    m.create_folder(rel_unix, dest=game_folder_id)
+                    sub_id = m.find_path_descriptor(target_path)
+                cloud_target_id = sub_id or game_folder_id
+
+            for file in files:
+                local_file = os.path.join(root, file)
+                m.upload(local_file, dest=cloud_target_id)
+                log_callback(f"[↑] Uploaded {file} to MEGA:{game_name}/{rel_path if rel_path != '.' else ''}")
+        log_callback(f"[✓] Uploaded {game_name} to MEGA.")
+    except Exception as e:
+        log_callback(f"[!] MEGA upload failed: {e}")
 
 def restore_from_mega(game_name, log_callback):
-    creds_path = os.path.expanduser("~/.gamesaves/mega_credentials.json")
+    creds_path = os.path.expanduser("./.gamesaves/mega_credentials.json")
     if not os.path.exists(creds_path):
         log_callback("[!] MEGA credentials not found.")
         return
 
-    with open(creds_path) as f:
-        creds = json.load(f)
+    try:
+        with open(creds_path) as f:
+            creds = json.load(f)
 
-    mega = Mega()
-    m = mega.login(creds["email"], creds["password"])
+        mega = Mega()
+        m = mega.login(creds["email"], creds["password"])
 
-    cloud_base = m.find('SaveSync')
-    if not cloud_base:
-        log_callback("[!] SaveSync folder not found on MEGA.")
-        return
+        cloud_base_id = m.find_path_descriptor('SaveSync')
+        if not cloud_base_id:
+            log_callback("[!] SaveSync folder not found on MEGA.")
+            return
 
-    game_folder = m.find(f'SaveSync/{game_name}')
-    if not game_folder:
-        log_callback(f"[!] No backups found for {game_name} on MEGA.")
-        return
+        game_folder_id = m.find_path_descriptor(f'SaveSync/{game_name}')
+        if not game_folder_id:
+            log_callback(f"[!] No backups found for {game_name} on MEGA.")
+            return
 
-    subfolders = [f for f in m.get_files_in_node(game_folder) if f['t'] == 1]
-    subfolders.sort(key=lambda x: x['ts'], reverse=True)
-    if not subfolders:
-        log_callback(f"[!] No cloud backups available for {game_name}")
-        return
+        # Get folders under the game folder
+        nodes = m.get_files_in_node(game_folder_id)
+        subfolders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+        subfolders.sort(key=lambda x: x[1].get('ts', 0), reverse=True)
+        if not subfolders:
+            log_callback(f"[!] No cloud backups available for {game_name}")
+            return
 
-    backup_names = [f['a']['n'] for f in subfolders]
-    selected = simpledialog.askstring("Restore from MEGA",
-        f"Available cloud backups:\n" + "\n".join(backup_names) + "\n\nType backup name:")
+        backup_names = [n['a']['n'] for _, n in subfolders]
+        selected = simpledialog.askstring(
+            "Restore from MEGA",
+            "Available cloud backups:\n" + "\n".join(backup_names) + "\n\nType backup name:"
+        )
 
-    if not selected or selected not in backup_names:
-        log_callback(f"[!] Invalid or cancelled cloud backup selection.")
-        return
+        if not selected or selected not in backup_names:
+            log_callback(f"[!] Invalid or cancelled cloud backup selection.")
+            return
 
-    selected_node = next(f for f in subfolders if f['a']['n'] == selected)
+        selected_id, selected_node = next((nid, n) for nid, n in subfolders if n['a']['n'] == selected)
 
-    config = load_config()
-    restore_to = os.path.expanduser(config[game_name]['save_path'])
-    if os.path.exists(restore_to):
-        shutil.rmtree(restore_to)
+        config = load_config()
+        restore_to = os.path.expanduser(config[game_name]['save_path'])
+        if os.path.exists(restore_to):
+            shutil.rmtree(restore_to)
+        os.makedirs(restore_to, exist_ok=True)
 
-    os.makedirs(restore_to, exist_ok=True)
-    temp_dir = os.path.join("/tmp", f"{game_name}_{selected}")
-    os.makedirs(temp_dir, exist_ok=True)
+        temp_dir = os.path.join("/tmp", f"{game_name}_{selected}")
+        os.makedirs(temp_dir, exist_ok=True)
 
-    files = [f for f in m.get_files_in_node(selected_node) if f['t'] == 0]
-    for fobj in files:
-        m.download(fobj, dest_path=temp_dir)
-        shutil.move(os.path.join(temp_dir, fobj['a']['n']), os.path.join(restore_to, fobj['a']['n']))
-        log_callback(f"[↓] Restored {fobj['a']['n']} to {restore_to}")
+        files_map = m.get_files_in_node(selected_id)
+        file_items = [(fid, n) for fid, n in files_map.items() if n['t'] == 0]
+        for fid, fobj in file_items:
+            # download expects a (id, dict) tuple
+            m.download((fid, fobj), dest_path=temp_dir)
+            src = os.path.join(temp_dir, fobj['a']['n'])
+            dst = os.path.join(restore_to, fobj['a']['n'])
+            shutil.move(src, dst)
+            log_callback(f"[↓] Restored {fobj['a']['n']} to {restore_to}")
 
-    shutil.rmtree(temp_dir)
-    log_callback(f"[✓] Cloud restore complete to {restore_to}")
+        shutil.rmtree(temp_dir)
+        log_callback(f"[✓] Cloud restore complete to {restore_to}")
+    except Exception as e:
+        log_callback(f"[!] MEGA restore failed: {e}")
 
 def backup_game(game_name, log_callback):
     config = load_config()
@@ -161,24 +196,41 @@ class SaveSyncApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SaveSync - Game Save Backup Tool")
-        self.geometry("450x230")
+        self.geometry("900x230")
         self.config = load_config()
         self.create_widgets()
         self.after(500, self.check_and_auto_backup)
+        self.protocol("WM_DELETE_WINDOW", self.on_exit)
+
+    def on_exit(self):
+        self.log(f"[*] Performing auto-sync and exiting SaveSync GUI.")
+        self.check_and_auto_backup()
+        self.destroy()
 
     def create_widgets(self):
         tk.Label(self, text="Select Game:").pack(pady=10)
+        tk.Label(
+            self,
+            text="Save sync performed automatically upon open and close of SaveSync.",
+            font=("TkDefaultFont", 9, "italic"),
+            fg="gray"
+        ).pack(pady=(0, 10))
+
         self.game_var = tk.StringVar(self)
         self.game_var.set(next(iter(self.config)))
 
-        tk.OptionMenu(self, self.game_var, *self.config.keys()).pack()
+        # Save a reference to the OptionMenu widget
+        self.option_menu = tk.OptionMenu(self, self.game_var, *self.config.keys())
+        self.option_menu.pack()
 
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=10)
 
-        tk.Button(btn_frame, text="Backup", command=self.backup).pack(side="left", padx=10)
-        tk.Button(btn_frame, text="Restore", command=self.restore).pack(side="left", padx=10)
+        tk.Button(btn_frame, text="Backup to local and MEGA", command=self.backup).pack(side="left", padx=10)
+        tk.Button(btn_frame, text="Restore from local", command=self.restore).pack(side="left", padx=10)
         tk.Button(btn_frame, text="Restore from MEGA", command=self.restore_from_cloud).pack(side="left", padx=10)
+        tk.Button(btn_frame, text="Reload Config", command=self.reload_json).pack(side="left", padx=20)
+        tk.Button(btn_frame, text="Exit and Sync", command=self.on_exit).pack(side="left", padx=10)
 
         self.status = tk.Label(self, text="Ready.", anchor="w", justify="left")
         self.status.pack(fill="x", padx=10, pady=10)
@@ -191,7 +243,19 @@ class SaveSyncApp(tk.Tk):
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
         with open(LOG_FILE, "a") as f:
             f.write(full_msg + "\n")
-
+    def reload_json(self):
+        try:
+            self.config = load_config()
+            # Update OptionMenu items
+            menu = self.option_menu['menu']
+            menu.delete(0, 'end')
+            for game in self.config.keys():
+                menu.add_command(label=game, command=lambda value=game: self.game_var.set(value))
+            self.game_var.set(next(iter(self.config)))
+            self.log("[✓] Configuration reloaded successfully.")
+        except Exception as e:
+            self.log(f"[!] Error reloading config: {e}")
+            messagebox.showerror("Error", f"Failed to reload configuration: {e}")
     def backup(self):
         game = self.game_var.get()
         backup_game(game, self.log)

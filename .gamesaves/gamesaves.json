@@ -1,8 +1,8 @@
 {
-    "Skyrim": {
-        "save_path": "~/SkyrimSaves"
+    "GTA IV": {
+        "save_path": "/home/jackbazzite/Faugus/gta-iv/drive_c/users/steamuser/Documents/Rockstar Games/"
     },
-    "Red Dead 2": {
-        "save_path": "~/.wine/drive_c/users/you/Documents/RDR2/Profiles"
+    "Psychonauts": {
+        "save_path": "/home/jackbazzite/Faugus/psychonauts-2/drive_c/users/steamuser/AppData/Local/Psychonauts2/"
     }
 }

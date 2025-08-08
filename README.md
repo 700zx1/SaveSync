@@ -11,12 +11,9 @@ SaveSync is a lightweight GUI-based backup manager for game save files. It suppo
 - Per-game configuration with toggle for:
   - Local backup (on/off)
   - Cloud backup to MEGA (on/off)
-- Differential backups (only changed files are zipped and uploaded)
 - Auto-backup when game saves change
-- Backup rotation:
-  - Keeps only the 3 most recent local and cloud backups
-- Log file: `~/.gamesaves/savesync.log`
-- Config: `~/.gamesaves/gamesaves.json`
+- Log file: `./.gamesaves/savesync.log`
+- Config: `./.gamesaves/gamesaves.json`
 
 ---
 
@@ -34,12 +31,12 @@ SaveSync is a lightweight GUI-based backup manager for game save files. It suppo
 
 ### Local backups:
 ```
-~/.gamesaves/backup/<GameName>/<timestamp>/
+./.gamesaves/backup/<GameName>/<timestamp>/
 ```
 
 ### Cloud backups:
 ```
-MEGA:/SaveSync/<GameName>/<timestamp>.zip
+MEGA:/SaveSync/<GameName>/<timestamp>/
 ```
 
 ---
@@ -60,12 +57,6 @@ MEGA:/SaveSync/<GameName>/<timestamp>.zip
   }
 }
 ```
-
----
-
-## 🧠 How Differential Backup Works
-
-Only files that differ (based on SHA256 hash) from the previous backup are included in the `.zip`. If no previous backup is found, all files are included.
 
 ---
 
