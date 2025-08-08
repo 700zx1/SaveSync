@@ -28,6 +28,48 @@ def folder_differs(folder1, folder2):
                 return True
     return False
 
+def _get_child_folder_id(m, parent_id, name):
+    children = m.get_files_in_node(parent_id)
+    for nid, n in children.items():
+        if n['t'] == 1 and n['a']['n'] == name:
+            return nid
+    return None
+
+def _ensure_child_folder(m, parent_id, name):
+    cid = _get_child_folder_id(m, parent_id, name)
+    if cid:
+        return cid
+    created = m._mkdir(name, parent_id)
+    return created['f'][0]['h']
+
+def _ensure_path(m, parent_id, rel_path):
+    current = parent_id
+    for seg in rel_path.replace(os.sep, '/').split('/'):
+        if not seg or seg == '.':
+            continue
+        current = _ensure_child_folder(m, current, seg)
+    return current
+
+def enforce_mega_retention(m, game_name, keep, log_callback):
+    # Ensure SaveSync/game exists; if not, nothing to prune
+    root_id = m.get_node_by_type(2)[0]
+    savesync_id = _get_child_folder_id(m, root_id, 'SaveSync')
+    if not savesync_id:
+        return
+    game_id = _get_child_folder_id(m, savesync_id, game_name)
+    if not game_id:
+        return
+
+    nodes = m.get_files_in_node(game_id)
+    ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+    # Sort newest first by name (YYYY-MM-DD_HH-MM-SS sorts lexicographically)
+    ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
+
+    for nid, n in ts_folders[keep:]:
+        m.destroy(nid)
+        if log_callback:
+            log_callback(f"[x] Pruned old cloud backup: {n['a']['n']}")
+
 def upload_to_mega(game_name, folder_path, log_callback):
     creds_path = os.path.expanduser("./.gamesaves/mega_credentials.json")
     if not os.path.exists(creds_path):
@@ -41,41 +83,35 @@ def upload_to_mega(game_name, folder_path, log_callback):
         mega = Mega()
         m = mega.login(creds["email"], creds["password"])
 
-        # Ensure SaveSync root folder exists and get its node ID
-        cloud_base_id = m.find_path_descriptor('SaveSync')
-        if not cloud_base_id:
-            m.create_folder('SaveSync')
-            cloud_base_id = m.find_path_descriptor('SaveSync')
-        if not cloud_base_id:
-            log_callback("[!] Could not create or find 'SaveSync' folder on MEGA.")
-            return
-
-        # Ensure game folder exists under SaveSync and get its node ID
-        game_folder_id = m.find_path_descriptor(f'SaveSync/{game_name}')
-        if not game_folder_id:
-            m.create_folder(game_name, dest=cloud_base_id)
-            game_folder_id = m.find_path_descriptor(f'SaveSync/{game_name}')
-        if not game_folder_id:
-            log_callback(f"[!] Could not create or find '{game_name}' folder on MEGA.")
-            return
+        # Ensure SaveSync/game/timestamp hierarchy
+        root_id = m.get_node_by_type(2)[0]  # Cloud Drive
+        savesync_id = _ensure_child_folder(m, root_id, 'SaveSync')
+        game_folder_id = _ensure_child_folder(m, savesync_id, game_name)
+        ts_name = os.path.basename(os.path.normpath(folder_path))
+        ts_path = f"SaveSync/{game_name}/{ts_name}"
+        ts_id = m.find_path_descriptor(ts_path)
+        if not ts_id:
+            m.create_folder(ts_name, dest=game_folder_id)
+            ts_id = m.find_path_descriptor(ts_path)
 
         for root, _, files in os.walk(folder_path):
             rel_path = os.path.relpath(root, folder_path)
-            cloud_target_id = game_folder_id
-            if rel_path != ".":
-                rel_unix = rel_path.replace(os.sep, "/")
-                target_path = f'SaveSync/{game_name}/{rel_unix}'
-                sub_id = m.find_path_descriptor(target_path)
-                if not sub_id:
-                    m.create_folder(rel_unix, dest=game_folder_id)
-                    sub_id = m.find_path_descriptor(target_path)
-                cloud_target_id = sub_id or game_folder_id
-
+            if rel_path == ".":
+                target_id = ts_id
+                display_path = f"{game_name}/{ts_name}"
+            else:
+                target_id = _ensure_path(m, ts_id, rel_path)
+                display_path = f"{game_name}/{ts_name}/{rel_path}"
             for file in files:
                 local_file = os.path.join(root, file)
-                m.upload(local_file, dest=cloud_target_id)
-                log_callback(f"[↑] Uploaded {file} to MEGA:{game_name}/{rel_path if rel_path != '.' else ''}")
-        log_callback(f"[✓] Uploaded {game_name} to MEGA.")
+                m.upload(local_file, dest=target_id)
+                log_callback(f"[↑] Uploaded {file} to MEGA:{display_path}")
+
+        log_callback(f"[✓] Uploaded {game_name} {ts_name} to MEGA.")
+
+        # Keep only latest 3 timestamped backups
+        enforce_mega_retention(m, game_name, keep=3, log_callback=log_callback)
+
     except Exception as e:
         log_callback(f"[!] MEGA upload failed: {e}")
 
