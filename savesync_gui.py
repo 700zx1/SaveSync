@@ -8,9 +8,12 @@ from tkinter import ttk
 import threading
 from mega import Mega
 
-CONFIG_FILE = os.path.expanduser("./.gamesaves/gamesaves.json")
-BACKUP_ROOT = os.path.expanduser("./.gamesaves/backup/")
-LOG_FILE = os.path.expanduser("./.gamesaves/savesync.log")
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.path.join(HOME, ".gamesaves")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "gamesaves.json")
+BACKUP_ROOT = os.path.join(CONFIG_DIR, "backup")
+LOG_FILE = os.path.join(CONFIG_DIR, "savesync.log")
+MEGA_CREDS = os.path.join(CONFIG_DIR, "mega_credentials.json")
 
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
@@ -73,7 +76,7 @@ def enforce_mega_retention(m, game_name, keep, log_callback):
             log_callback(f"[x] Pruned old cloud backup: {n['a']['n']}")
 
 def upload_to_mega(game_name, folder_path, log_callback):
-    creds_path = os.path.expanduser("./.gamesaves/mega_credentials.json")
+    creds_path = MEGA_CREDS
     if not os.path.exists(creds_path):
         log_callback("[!] MEGA credentials not found.")
         return
@@ -118,7 +121,7 @@ def upload_to_mega(game_name, folder_path, log_callback):
         log_callback(f"[!] MEGA upload failed: {e}")
 
 def restore_from_mega(game_name, log_callback):
-    creds_path = os.path.expanduser("./.gamesaves/mega_credentials.json")
+    creds_path = MEGA_CREDS
     if not os.path.exists(creds_path):
         log_callback("[!] MEGA credentials not found.")
         return

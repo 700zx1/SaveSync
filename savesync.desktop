@@ -1,18 +1,10 @@
 [Desktop Entry]
-Categories=Game;Utility;
-Comment[en_US]=
-Comment=
-Exec='/home/$USER/Applications/SaveSync/faugus_with_savesync.sh'
-GenericName[en_US]=
-GenericName=
-Icon=utilities-terminal
-MimeType=
-Name[en_US]=Launch Faugus with SaveSync
-Name=Launch Faugus with SaveSync
-Path=
-StartupNotify=true
-Terminal=false
-TerminalOptions=
 Type=Application
-X-KDE-SubstituteUID=false
-X-KDE-Username=
+Name=Launch Faugus with SaveSync
+Comment=Start SaveSync, launch Faugus, then sync on exit
+Exec=/usr/bin/env sh -lc '"$HOME/Applications/SaveSync/faugus_with_savesync.sh" %U'
+#TryExec=
+Icon=utilities-terminal
+Terminal=false
+Categories=Game;Utility;
+StartupNotify=true

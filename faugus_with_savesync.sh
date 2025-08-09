@@ -34,14 +34,6 @@ if command -v xdotool >/dev/null 2>&1; then
   fi
 fi
 
-# Fallback: TERM the process if still running
-if kill -0 "$SS_PID" 2>/dev/null; then
-  kill -TERM "$SS_PID"
-  # Wait up to ~10s for clean exit
-  for i in {1..100}; do
-    kill -0 "$SS_PID" 2>/dev/null || break
-    sleep 0.1
-  done
-fi
+# Don't force close window.  Close SaveSync manually if needed.
 
 exit $FAUGUS_STATUS
