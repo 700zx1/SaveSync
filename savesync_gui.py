@@ -4,6 +4,8 @@ import shutil
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, simpledialog
+from tkinter import ttk
+import threading
 from mega import Mega
 
 CONFIG_FILE = os.path.expanduser("./.gamesaves/gamesaves.json")
@@ -262,23 +264,42 @@ class SaveSyncApp(tk.Tk):
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=10)
 
-        tk.Button(btn_frame, text="Backup to local and MEGA", command=self.backup).pack(side="left", padx=10)
-        tk.Button(btn_frame, text="Restore from local", command=self.restore).pack(side="left", padx=10)
-        tk.Button(btn_frame, text="Restore from MEGA", command=self.restore_from_cloud).pack(side="left", padx=10)
-        tk.Button(btn_frame, text="Reload Config", command=self.reload_json).pack(side="left", padx=20)
-        tk.Button(btn_frame, text="Exit and Sync", command=self.on_exit).pack(side="left", padx=10)
+        # Buttons (keep references)
+        self.btn_backup = tk.Button(btn_frame, text="Backup to local and MEGA", command=self.backup)
+        self.btn_backup.pack(side="left", padx=10)
+
+        self.btn_restore_local = tk.Button(btn_frame, text="Restore from local", command=self.restore)
+        self.btn_restore_local.pack(side="left", padx=10)
+
+        self.btn_restore_cloud = tk.Button(btn_frame, text="Restore from MEGA", command=self.restore_from_cloud)
+        self.btn_restore_cloud.pack(side="left", padx=10)
+
+        self.btn_reload = tk.Button(btn_frame, text="Reload Config", command=self.reload_json)
+        self.btn_reload.pack(side="left", padx=20)
+
+        self.btn_exit = tk.Button(btn_frame, text="Exit and Sync", command=self.on_exit)
+        self.btn_exit.pack(side="left", padx=10)
 
         self.status = tk.Label(self, text="Ready.", anchor="w", justify="left")
         self.status.pack(fill="x", padx=10, pady=10)
 
+        # Progress bar
+        self.progress = ttk.Progressbar(self, mode="indeterminate")
+        self.progress.pack(fill="x", padx=10, pady=(0, 10))
+
     def log(self, message):
-        timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-        full_msg = f"{timestamp} {message}"
-        self.status.config(text=message)
-        print(full_msg)
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(full_msg + "\n")
+        def do():
+            timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+            full_msg = f"{timestamp} {message}"
+            self.status.config(text=message)
+            print(full_msg)
+            os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+            with open(LOG_FILE, "a") as f:
+                f.write(full_msg + "\n")
+        if threading.current_thread() is threading.main_thread():
+            do()
+        else:
+            self.after(0, do)
     def reload_json(self):
         try:
             self.config = load_config()
@@ -294,7 +315,7 @@ class SaveSyncApp(tk.Tk):
             messagebox.showerror("Error", f"Failed to reload configuration: {e}")
     def backup(self):
         game = self.game_var.get()
-        backup_game(game, self.log)
+        self.run_in_bg(lambda: backup_game(game, self.log))
 
     def restore(self):
         game = self.game_var.get()
@@ -302,7 +323,25 @@ class SaveSyncApp(tk.Tk):
 
     def restore_from_cloud(self):
         game = self.game_var.get()
-        restore_from_mega(game, self.log)
+        self.run_in_bg(lambda: restore_from_mega(game, self.log))
+
+    def set_busy(self, busy: bool):
+        state = "disabled" if busy else "normal"
+        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit):
+            b.config(state=state)
+        if busy:
+            self.progress.start(10)  # 10ms step
+        else:
+            self.progress.stop()
+
+    def run_in_bg(self, fn):
+        def worker():
+            try:
+                fn()
+            finally:
+                self.after(0, lambda: self.set_busy(False))
+        self.set_busy(True)
+        threading.Thread(target=worker, daemon=True).start()
 
     def check_and_auto_backup(self):
         self.log("Checking for save changes...")
@@ -319,7 +358,7 @@ class SaveSyncApp(tk.Tk):
 
             if not latest_backup or folder_differs(save_path, latest_backup):
                 self.log(f"[✓] Change detected in {game}, creating backup...")
-                backup_game(game, self.log)
+                self.run_in_bg(lambda: backup_game(game, self.log))
             else:
                 self.log(f"[=] No changes in {game}")
 
