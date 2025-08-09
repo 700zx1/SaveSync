@@ -2,7 +2,7 @@
 Categories=Game;Utility;
 Comment[en_US]=
 Comment=
-Exec='/home/$USER/Applications/savesync/faugus_with_savesync.sh'
+Exec='/home/$USER/Applications/SaveSync/faugus_with_savesync.sh'
 GenericName[en_US]=
 GenericName=
 Icon=utilities-terminal
