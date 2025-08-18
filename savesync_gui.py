@@ -8,6 +8,13 @@ from tkinter import ttk
 import threading
 from mega import Mega
 
+try:
+    import ttkbootstrap as ttkb  # optional modern theme
+    _HAVE_TTKB = True
+except Exception:
+    ttkb = None
+    _HAVE_TTKB = False
+
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(HOME, ".gamesaves")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "gamesaves.json")
@@ -236,65 +243,140 @@ def restore_game(game_name, log_callback):
 class SaveSyncApp(tk.Tk):
     def __init__(self):
         super().__init__()
+        # Apply modern theme if available
+        if _HAVE_TTKB:
+            self.style = ttkb.Style(theme="darkly")
+        else:
+            self.style = ttk.Style()
+            try:
+                self.style.theme_use("clam")
+            except Exception:
+                pass
+
         self.title("SaveSync - Game Save Backup Tool")
-        self.geometry("900x230")
+        self.geometry("900x600")
+        self.minsize(820, 520)
+
         self.config = load_config()
-        self.create_widgets()
+        self._init_styles()
+        self._build_layout()
+
         self.after(500, self.check_and_auto_backup)
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
 
+    def _init_styles(self):
+        # Fallback label styles when ttkbootstrap is not present
+        if not _HAVE_TTKB:
+            try:
+                self.style.configure("Title.TLabel", font=("TkDefaultFont", 14, "bold"))
+                self.style.configure("Muted.TLabel", foreground="gray")
+            except Exception:
+                pass
+
     def on_exit(self):
-        self.log(f"[*] Performing auto-sync and exiting SaveSync GUI.")
+        self.log("[*] Performing auto-sync and exiting SaveSync GUI.")
         self.check_and_auto_backup()
         self.destroy()
 
-    def create_widgets(self):
-        tk.Label(self, text="Select Game:").pack(pady=10)
-        tk.Label(
-            self,
-            text="Save sync performed automatically upon open and close of SaveSync.",
-            font=("TkDefaultFont", 9, "italic"),
-            fg="gray"
-        ).pack(pady=(0, 10))
+    def _build_layout(self):
+        content = ttk.Frame(self, padding=16)
+        content.pack(fill="both", expand=True)
+
+        # Header
+        title = ttk.Label(content, text="SaveSync", style="Title.TLabel")
+        subtitle = ttk.Label(
+            content,
+            text="Save sync is performed automatically when SaveSync opens and closes.",
+            style="Muted.TLabel"
+        )
+        title.grid(row=0, column=0, sticky="w")
+        subtitle.grid(row=1, column=0, sticky="w", pady=(2, 16))
+
+        # Controls row
+        ctrls = ttk.Frame(content)
+        ctrls.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        ctrls.columnconfigure(3, weight=1)
+
+        ttk.Label(ctrls, text="Select Game:").grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         self.game_var = tk.StringVar(self)
         self.game_var.set(next(iter(self.config)))
+        self.game_select = ttk.Combobox(
+            ctrls,
+            textvariable=self.game_var,
+            values=list(self.config.keys()),
+            state="readonly",
+            width=28,
+        )
+        self.game_select.grid(row=0, column=1, sticky="w", padx=(0, 12))
 
-        # Save a reference to the OptionMenu widget
-        self.option_menu = tk.OptionMenu(self, self.game_var, *self.config.keys())
-        self.option_menu.pack()
+        # Button styles for ttkbootstrap
+        primary = "primary.TButton" if _HAVE_TTKB else None
+        secondary = "secondary.TButton" if _HAVE_TTKB else None
+        info = "info.TButton" if _HAVE_TTKB else None
+        warning = "warning.TButton" if _HAVE_TTKB else None
+        danger = "danger.TButton" if _HAVE_TTKB else None
 
-        btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
+        self.btn_backup = ttk.Button(
+            ctrls, text="Backup to local and MEGA", command=self.backup, **({"style": primary} if primary else {})
+        )
+        self.btn_restore_local = ttk.Button(
+            ctrls, text="Restore from local", command=self.restore, **({"style": secondary} if secondary else {})
+        )
+        self.btn_restore_cloud = ttk.Button(
+            ctrls, text="Restore from MEGA", command=self.restore_from_cloud, **({"style": info} if info else {})
+        )
+        self.btn_reload = ttk.Button(
+            ctrls, text="Reload Config", command=self.reload_json, **({"style": warning} if warning else {})
+        )
+        self.btn_exit = ttk.Button(
+            ctrls, text="Exit and Sync", command=self.on_exit, **({"style": danger} if danger else {})
+        )
 
-        # Buttons (keep references)
-        self.btn_backup = tk.Button(btn_frame, text="Backup to local and MEGA", command=self.backup)
-        self.btn_backup.pack(side="left", padx=10)
+        self.btn_backup.grid(row=0, column=2, padx=(0, 8))
+        self.btn_restore_local.grid(row=0, column=3, padx=(0, 8), sticky="w")
+        self.btn_restore_cloud.grid(row=0, column=4, padx=(0, 8))
+        self.btn_reload.grid(row=0, column=5, padx=(0, 8))
+        self.btn_exit.grid(row=0, column=6)
 
-        self.btn_restore_local = tk.Button(btn_frame, text="Restore from local", command=self.restore)
-        self.btn_restore_local.pack(side="left", padx=10)
+        # Activity log panel
+        log_frame = ttk.LabelFrame(content, text="Activity")
+        log_frame.grid(row=3, column=0, sticky="nsew", pady=(6, 10))
+        content.rowconfigure(3, weight=1)
+        content.columnconfigure(0, weight=1)
 
-        self.btn_restore_cloud = tk.Button(btn_frame, text="Restore from MEGA", command=self.restore_from_cloud)
-        self.btn_restore_cloud.pack(side="left", padx=10)
+        self.log_text = tk.Text(
+            log_frame, height=14, wrap="word", state="disabled", borderwidth=0, highlightthickness=0
+        )
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
 
-        self.btn_reload = tk.Button(btn_frame, text="Reload Config", command=self.reload_json)
-        self.btn_reload.pack(side="left", padx=20)
+        self.log_text.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        log_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 8), pady=8)
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
 
-        self.btn_exit = tk.Button(btn_frame, text="Exit and Sync", command=self.on_exit)
-        self.btn_exit.pack(side="left", padx=10)
+        # Status bar
+        status_bar = ttk.Frame(self, padding=(16, 0, 16, 16))
+        status_bar.pack(fill="x", side="bottom")
 
-        self.status = tk.Label(self, text="Ready.", anchor="w", justify="left")
-        self.status.pack(fill="x", padx=10, pady=10)
+        self.status = ttk.Label(status_bar, text="Ready.", anchor="w")
+        self.status.pack(fill="x", side="left", expand=True)
 
-        # Progress bar
-        self.progress = ttk.Progressbar(self, mode="indeterminate")
-        self.progress.pack(fill="x", padx=10, pady=(0, 10))
+        self.progress = ttk.Progressbar(status_bar, mode="indeterminate", length=220)
+        self.progress.pack(side="right", padx=(12, 0))
 
     def log(self, message):
         def do():
             timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
             full_msg = f"{timestamp} {message}"
             self.status.config(text=message)
+            # Append to log view
+            if hasattr(self, "log_text"):
+                self.log_text.configure(state="normal")
+                self.log_text.insert("end", full_msg + "\n")
+                self.log_text.see("end")
+                self.log_text.configure(state="disabled")
             print(full_msg)
             os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
             with open(LOG_FILE, "a") as f:
@@ -303,19 +385,18 @@ class SaveSyncApp(tk.Tk):
             do()
         else:
             self.after(0, do)
+
     def reload_json(self):
         try:
             self.config = load_config()
-            # Update OptionMenu items
-            menu = self.option_menu['menu']
-            menu.delete(0, 'end')
-            for game in self.config.keys():
-                menu.add_command(label=game, command=lambda value=game: self.game_var.set(value))
+            # Update game selector values
+            self.game_select['values'] = list(self.config.keys())
             self.game_var.set(next(iter(self.config)))
             self.log("[✓] Configuration reloaded successfully.")
         except Exception as e:
             self.log(f"[!] Error reloading config: {e}")
             messagebox.showerror("Error", f"Failed to reload configuration: {e}")
+
     def backup(self):
         game = self.game_var.get()
         self.run_in_bg(lambda: backup_game(game, self.log))
@@ -333,7 +414,7 @@ class SaveSyncApp(tk.Tk):
         for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit):
             b.config(state=state)
         if busy:
-            self.progress.start(10)  # 10ms step
+            self.progress.start(10)
         else:
             self.progress.stop()
 
