@@ -3,7 +3,7 @@ import json
 import shutil
 from datetime import datetime
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, filedialog
 from tkinter import ttk
 import threading
 from mega import Mega
@@ -25,6 +25,11 @@ MEGA_CREDS = os.path.join(CONFIG_DIR, "mega_credentials.json")
 def load_config():
     with open(CONFIG_FILE, 'r') as f:
         return json.load(f)
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(cfg, f, indent=4)
 
 def folder_differs(folder1, folder2):
     for root, _, files in os.walk(folder1):
@@ -254,7 +259,7 @@ class SaveSyncApp(tk.Tk):
                 pass
 
         self.title("SaveSync - Game Save Backup Tool")
-        self.geometry("900x600")
+        self.geometry("1000x600")
         self.minsize(820, 520)
 
         self.config = load_config()
@@ -300,7 +305,11 @@ class SaveSyncApp(tk.Tk):
         ttk.Label(ctrls, text="Select Game:").grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         self.game_var = tk.StringVar(self)
-        self.game_var.set(next(iter(self.config)))
+        # safe default if config is empty
+        if self.config:
+            self.game_var.set(next(iter(self.config)))
+        else:
+            self.game_var.set("")
         self.game_select = ttk.Combobox(
             ctrls,
             textvariable=self.game_var,
@@ -316,6 +325,12 @@ class SaveSyncApp(tk.Tk):
         info = "info.TButton" if _HAVE_TTKB else None
         warning = "warning.TButton" if _HAVE_TTKB else None
         danger = "danger.TButton" if _HAVE_TTKB else None
+
+        # Add Game button (browse for folder and add to config)
+        self.btn_add = ttk.Button(
+            ctrls, text="Add Game", command=self.add_game, **({"style": primary} if primary else {})
+        )
+        self.btn_add.grid(row=0, column=7, padx=(0, 8))
 
         self.btn_backup = ttk.Button(
             ctrls, text="Backup to local and MEGA", command=self.backup, **({"style": primary} if primary else {})
@@ -391,7 +406,10 @@ class SaveSyncApp(tk.Tk):
             self.config = load_config()
             # Update game selector values
             self.game_select['values'] = list(self.config.keys())
-            self.game_var.set(next(iter(self.config)))
+            if self.config:
+                self.game_var.set(next(iter(self.config)))
+            else:
+                self.game_var.set("")
             self.log("[✓] Configuration reloaded successfully.")
         except Exception as e:
             self.log(f"[!] Error reloading config: {e}")
@@ -411,7 +429,7 @@ class SaveSyncApp(tk.Tk):
 
     def set_busy(self, busy: bool):
         state = "disabled" if busy else "normal"
-        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit):
+        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit, self.btn_add):
             b.config(state=state)
         if busy:
             self.progress.start(10)
@@ -445,6 +463,33 @@ class SaveSyncApp(tk.Tk):
                 self.run_in_bg(lambda: backup_game(game, self.log))
             else:
                 self.log(f"[=] No changes in {game}")
+
+    def add_game(self):
+        name = simpledialog.askstring("Add Game", "Enter game name:")
+        if not name:
+            self.log("[!] Add game cancelled or no name provided.")
+            return
+
+        folder = filedialog.askdirectory(title=f"Select save folder for {name}")
+        if not folder:
+            self.log("[!] Add game cancelled or no folder selected.")
+            return
+
+        # store as provided; optionally collapse home to ~
+        if folder.startswith(HOME):
+            folder = folder.replace(HOME, "~", 1)
+
+        # Update in-memory config and write to disk
+        self.config[name] = {"save_path": folder}
+        try:
+            save_config(self.config)
+            # refresh UI
+            self.game_select['values'] = list(self.config.keys())
+            self.game_var.set(name)
+            self.log(f"[✓] Added {name} -> {folder} to config.")
+        except Exception as e:
+            self.log(f"[!] Failed to save new game to config: {e}")
+            messagebox.showerror("Error", f"Failed to add game: {e}")
 
 if __name__ == "__main__":
     os.makedirs(BACKUP_ROOT, exist_ok=True)
