@@ -326,33 +326,43 @@ class SaveSyncApp(tk.Tk):
         warning = "warning.TButton" if _HAVE_TTKB else None
         danger = "danger.TButton" if _HAVE_TTKB else None
 
-        # Add Game button (browse for folder and add to config)
-        self.btn_add = ttk.Button(
-            ctrls, text="Add Game", command=self.add_game, **({"style": primary} if primary else {})
-        )
-        self.btn_add.grid(row=0, column=7, padx=(0, 8))
+        # Buttons arranged in two horizontal rows for better layout
+        btn_frame = ttk.Frame(ctrls)
+        btn_frame.grid(row=1, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
+        # First row: backup / restore / cloud restore / reload
         self.btn_backup = ttk.Button(
-            ctrls, text="Backup to local and MEGA", command=self.backup, **({"style": primary} if primary else {})
+            btn_frame, text="Backup to local and MEGA", command=self.backup, **({"style": primary} if primary else {})
         )
         self.btn_restore_local = ttk.Button(
-            ctrls, text="Restore from local", command=self.restore, **({"style": secondary} if secondary else {})
+            btn_frame, text="Restore from local", command=self.restore, **({"style": secondary} if secondary else {})
         )
         self.btn_restore_cloud = ttk.Button(
-            ctrls, text="Restore from MEGA", command=self.restore_from_cloud, **({"style": info} if info else {})
+            btn_frame, text="Restore from MEGA", command=self.restore_from_cloud, **({"style": info} if info else {})
         )
         self.btn_reload = ttk.Button(
-            ctrls, text="Reload Config", command=self.reload_json, **({"style": warning} if warning else {})
-        )
-        self.btn_exit = ttk.Button(
-            ctrls, text="Exit and Sync", command=self.on_exit, **({"style": danger} if danger else {})
+            btn_frame, text="Reload Config", command=self.reload_json, **({"style": warning} if warning else {})
         )
 
-        self.btn_backup.grid(row=0, column=2, padx=(0, 8))
-        self.btn_restore_local.grid(row=0, column=3, padx=(0, 8), sticky="w")
-        self.btn_restore_cloud.grid(row=0, column=4, padx=(0, 8))
-        self.btn_reload.grid(row=0, column=5, padx=(0, 8))
-        self.btn_exit.grid(row=0, column=6)
+        self.btn_backup.grid(row=0, column=0, padx=(0, 8), pady=(0, 6))
+        self.btn_restore_local.grid(row=0, column=1, padx=(0, 8), pady=(0, 6))
+        self.btn_restore_cloud.grid(row=0, column=2, padx=(0, 8), pady=(0, 6))
+        self.btn_reload.grid(row=0, column=3, padx=(0, 8), pady=(0, 6))
+
+        # Second row: add / remove / exit
+        self.btn_add = ttk.Button(
+            btn_frame, text="Add Game", command=self.add_game, **({"style": primary} if primary else {})
+        )
+        self.btn_remove = ttk.Button(
+            btn_frame, text="Remove Game", command=self.remove_game, **({"style": danger} if danger else {})
+        )
+        self.btn_exit = ttk.Button(
+            btn_frame, text="Exit and Sync", command=self.on_exit, **({"style": danger} if danger else {})
+        )
+
+        self.btn_add.grid(row=1, column=0, padx=(0, 8))
+        self.btn_remove.grid(row=1, column=1, padx=(0, 8))
+        self.btn_exit.grid(row=1, column=2, padx=(0, 8))
 
         # Activity log panel
         log_frame = ttk.LabelFrame(content, text="Activity")
@@ -429,7 +439,7 @@ class SaveSyncApp(tk.Tk):
 
     def set_busy(self, busy: bool):
         state = "disabled" if busy else "normal"
-        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit, self.btn_add):
+        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit, self.btn_add, getattr(self, "btn_remove", None)):
             b.config(state=state)
         if busy:
             self.progress.start(10)
@@ -490,6 +500,38 @@ class SaveSyncApp(tk.Tk):
         except Exception as e:
             self.log(f"[!] Failed to save new game to config: {e}")
             messagebox.showerror("Error", f"Failed to add game: {e}")
+
+    def remove_game(self):
+        selected = self.game_var.get()
+        if not selected:
+            messagebox.showinfo("Remove Game", "No game selected to remove.")
+            return
+
+        if selected not in self.config:
+            self.log(f"[!] Selected game '{selected}' not present in config.")
+            messagebox.showerror("Error", f"Game '{selected}' not found in configuration.")
+            return
+
+        confirm = messagebox.askyesno("Confirm Remove", f"Remove '{selected}' from configuration? This will not delete backups unless you do so manually.")
+        if not confirm:
+            self.log("[!] Remove game cancelled.")
+            return
+
+        try:
+            # remove from in-memory config and persist
+            del self.config[selected]
+            save_config(self.config)
+            # update UI values
+            values = list(self.config.keys())
+            self.game_select['values'] = values
+            if values:
+                self.game_var.set(values[0])
+            else:
+                self.game_var.set("")
+            self.log(f"[✓] Removed '{selected}' from configuration.")
+        except Exception as e:
+            self.log(f"[!] Failed to remove game: {e}")
+            messagebox.showerror("Error", f"Failed to remove game: {e}")
 
 if __name__ == "__main__":
     os.makedirs(BACKUP_ROOT, exist_ok=True)
