@@ -2,9 +2,18 @@
 Type=Application
 Name=Launch Faugus with SaveSync
 Comment=Start SaveSync, launch Faugus, then sync on exit
-Exec=/usr/bin/env sh -lc '"$HOME/Applications/SaveSync/faugus_with_savesync.sh" %U'
-#TryExec=
+Exec=/usr/bin/env sh -c '
+	PROJECT="$HOME/Applications/SaveSync"; \
+	if [ -x "$PROJECT/savesync_launcher.sh" ]; then
+		exec "$PROJECT/savesync_launcher.sh" %U
+	elif [ -x "$PROJECT/.venv/bin/python" ]; then
+		exec "$PROJECT/.venv/bin/python" "$PROJECT/savesync_gui.py"
+	else
+		exec /usr/bin/env python3 "$PROJECT/savesync_gui.py"
+	fi'
+TryExec=$HOME/Applications/dev/savesync/savesync_launcher.sh
 Icon=utilities-terminal
 Terminal=false
 Categories=Game;Utility;
 StartupNotify=true
+X-GNOME-Autostart-enabled=true
