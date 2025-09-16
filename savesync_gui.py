@@ -359,10 +359,16 @@ class SaveSyncApp(tk.Tk):
         self.btn_exit = ttk.Button(
             btn_frame, text="Exit and Sync", command=self.on_exit, **({"style": danger} if danger else {})
         )
-
+        self.btn_list = ttk.Button(
+            btn_frame,
+            text='List Backups',
+            command=self.list_backups,
+            **({"style": info} if info else {})
+        )
         self.btn_add.grid(row=1, column=0, padx=(0, 8))
         self.btn_remove.grid(row=1, column=1, padx=(0, 8))
         self.btn_exit.grid(row=1, column=2, padx=(0, 8))
+        self.btn_list.grid(row=1, column=3, padx=(0, 8))
 
         # Activity log panel
         log_frame = ttk.LabelFrame(content, text="Activity")
@@ -436,11 +442,89 @@ class SaveSyncApp(tk.Tk):
     def restore_from_cloud(self):
         game = self.game_var.get()
         self.run_in_bg(lambda: restore_from_mega(game, self.log))
+    
+    def list_backups(self):
+        # Run listing in background to avoid blocking UI
+        self.run_in_bg(self._list_backups_worker)
+
+    def _list_backups_worker(self):
+        lines = []
+        # Local backups
+        for game, info in self.config.items():
+            lines.append(f"{game}:")
+            backup_dir = os.path.join(BACKUP_ROOT, game)
+            if os.path.exists(backup_dir):
+                items = sorted(os.listdir(backup_dir), reverse=True)
+                if items:
+                    for b in items:
+                        lines.append(f"  (local) - {b}")
+                else:
+                    lines.append("  (local) (no local backups)")
+            else:
+                lines.append("  (local) (no local backups)")
+            lines.append("")  # blank line between games
+
+        # Cloud backups via MEGA (if credentials present)
+        if os.path.exists(MEGA_CREDS):
+            try:
+                with open(MEGA_CREDS) as f:
+                    creds = json.load(f)
+                mega = Mega()
+                m = mega.login(creds.get("email"), creds.get("password"))
+                # Ensure SaveSync root exists
+                base = m.find_path_descriptor('SaveSync')
+                for game, _ in self.config.items():
+                    # find game folder under SaveSync
+                    game_id = m.find_path_descriptor(f"SaveSync/{game}")
+                    lines.append(f"{game} (cloud):")
+                    if not game_id:
+                        lines.append("  (cloud) (no cloud backups)")
+                        lines.append("")
+                        continue
+                    nodes = m.get_files_in_node(game_id)
+                    ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+                    # prefer lexicographic timestamp sorting (newest first)
+                    ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
+                    if ts_folders:
+                        for _, n in ts_folders:
+                            lines.append(f"  (cloud) - {n['a']['n']}")
+                    else:
+                        lines.append("  (cloud) (no cloud backups)")
+                    lines.append("")
+            except Exception as e:
+                # Append error note for cloud listing
+                lines.append(f"(cloud) Unable to query MEGA: {e}")
+                lines.append("")
+        else:
+            lines.append("(cloud) MEGA credentials not configured.")
+            lines.append("")
+
+        message = "\n".join(lines) if lines else "No games configured."
+
+        # Show result in GUI thread
+        self.after(0, lambda: self._show_backup_message(message))
+
+    def _show_backup_message(self, message: str):
+        # If message is long, show it in a scrollable Toplevel; otherwise use messagebox
+        if len(message) > 1000:
+            win = tk.Toplevel(self)
+            win.title("Backups (Local + MEGA)")
+            txt = tk.Text(win, wrap="word", height=30, width=80)
+            txt.insert("1.0", message)
+            txt.configure(state="disabled")
+            txt.pack(fill="both", expand=True, padx=8, pady=8)
+            btn = ttk.Button(win, text="Close", command=win.destroy)
+            btn.pack(pady=(0, 8))
+        else:
+            messagebox.showinfo("Backups (Local + MEGA)", message)
 
     def set_busy(self, busy: bool):
         state = "disabled" if busy else "normal"
-        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud, self.btn_reload, self.btn_exit, self.btn_add, getattr(self, "btn_remove", None)):
-            b.config(state=state)
+        for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud,
+                  self.btn_reload, self.btn_exit, self.btn_add,
+                  getattr(self, "btn_remove", None), getattr(self, "btn_list", None)):
+            if b:
+                b.config(state=state)
         if busy:
             self.progress.start(10)
         else:
