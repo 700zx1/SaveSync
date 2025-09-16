@@ -96,3 +96,32 @@ Create this file:
 ## 📋 License
 
 MIT License
+
+---
+
+## Install binary (Linux)
+
+When prebuilt native binaries are published in the GitHub Releases for this
+project, you can install the Linux binary with the included installer script.
+Run this command to download and execute the installer directly from the
+repository:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/700zx1/SaveSync/main/install_savesync.sh | sh
+```
+
+To install a specific release tag (for example `v1.2.3`) set the VERSION
+environment variable:
+
+```bash
+VERSION=v1.2.3 sh install_savesync.sh
+```
+
+If you don't have root privileges the script will install to `$HOME/.local/bin`.
+For fish users make sure `$HOME/.local/bin` is in your PATH; add this to
+`~/.config/fish/config.fish` if needed:
+
+```fish
+set -U fish_user_paths $HOME/.local/bin $fish_user_paths
+```
+
