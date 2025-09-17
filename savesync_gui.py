@@ -1051,17 +1051,47 @@ class SaveSyncApp(tk.Tk):
             return
         if getattr(self, 'tray_icon', None):
             return
+
         img = self._make_tray_image()
-        menu = pystray.Menu(
-            pystray.MenuItem('Restore', lambda icon, item: self.after(0, self._restore_from_tray)),
-            pystray.MenuItem('Quit', lambda icon, item: self.after(0, self._quit_from_tray))
-        )
-        icon = pystray.Icon('savesync', img, 'SaveSync', menu)
-        self.tray_icon = icon
+        # If image creation failed but PIL is available, create a simple placeholder.
+        if img is None and Image is not None:
+            try:
+                img = Image.new('RGBA', (64, 64), (40, 120, 200, 255))
+            except Exception:
+                img = None
+
+        # Define handlers with the signature pystray expects (icon, item).
+        def _on_restore(icon, item):
+            # schedule UI restore on main thread
+            try:
+                self.after(0, self._restore_from_tray)
+            except Exception:
+                pass
+
+        def _on_quit(icon, item):
+            try:
+                self.after(0, self._quit_from_tray)
+            except Exception:
+                pass
+
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem('Restore', _on_restore),
+                pystray.MenuItem('Quit', _on_quit)
+            )
+            icon = pystray.Icon('savesync', img, 'SaveSync', menu)
+            self.tray_icon = icon
+        except Exception as e:
+            self.log(f"[!] Failed to create tray icon: {e}")
+            return
 
         def run_icon():
             try:
-                icon.run()
+                # Prefer run_detached() if available (non-blocking internal loop)
+                if hasattr(icon, "run_detached"):
+                    icon.run_detached()
+                else:
+                    icon.run()
             except Exception as e:
                 self.log(f"[!] Tray icon failed: {e}")
 
@@ -1072,23 +1102,63 @@ class SaveSyncApp(tk.Tk):
         icon = getattr(self, 'tray_icon', None)
         if icon:
             try:
-                icon.stop()
+                # Attempt to stop the icon event loop in a safe way
+                stop_fn = getattr(icon, "stop", None)
+                if callable(stop_fn):
+                    try:
+                        stop_fn()
+                    except Exception:
+                        # some backends may require calling icon.visible = False first
+                        try:
+                            icon.visible = False
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        icon.visible = False
+                    except Exception:
+                        pass
             except Exception:
                 pass
         self.tray_icon = None
 
     def _restore_from_tray(self):
         try:
+            # Bring the window back, raise it and give it focus.
             self.deiconify()
-            self._stop_tray()
+            try:
+                self.lift()
+            except Exception:
+                pass
+            try:
+                self.focus_force()
+            except Exception:
+                pass
+            # Some WMs ignore lift/focus unless window is briefly topmost.
+            try:
+                self.attributes('-topmost', True)
+                self.after(120, lambda: self.attributes('-topmost', False))
+            except Exception:
+                pass
+            # Ensure tray icon is stopped
+            try:
+                self._stop_tray()
+            except Exception:
+                pass
         except Exception:
             pass
 
     def _quit_from_tray(self):
         try:
-            self._stop_tray()
+            try:
+                self._stop_tray()
+            except Exception:
+                pass
         finally:
-            self.destroy()
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
     def _on_iconify(self, event=None):
         # Called when window is minimized/iconified
