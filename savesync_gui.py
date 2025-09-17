@@ -13,6 +13,15 @@ except Exception:
     Mega = None
     _HAVE_MEGA = False
 import tempfile
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    _HAVE_PYSTRAY = True
+except Exception:
+    pystray = None
+    Image = None
+    ImageDraw = None
+    _HAVE_PYSTRAY = False
 
 try:
     import ttkbootstrap as ttkb  # optional modern theme
@@ -73,6 +82,60 @@ def _ensure_path(m, parent_id, rel_path):
         current = _ensure_child_folder(m, current, seg)
     return current
 
+
+class _Tooltip:
+    """Simple tooltip implementation for tkinter widgets.
+
+    Usage: attach_tooltip(widget, 'text'). Tooltip shows on hover.
+    """
+    def __init__(self, widget, text=''):
+        self.widget = widget
+        self.text = text
+        self.top = None
+        self.id_enter = widget.bind('<Enter>', self._on_enter, add='+')
+        self.id_leave = widget.bind('<Leave>', self._on_leave, add='+')
+
+    def _on_enter(self, event=None):
+        # only show if widget is disabled
+        try:
+            state = str(self.widget.cget('state'))
+        except Exception:
+            state = 'normal'
+        if state != 'disabled':
+            return
+        if not self.text:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.top = tk.Toplevel(self.widget)
+        self.top.wm_overrideredirect(True)
+        # small label
+        lbl = ttk.Label(self.top, text=self.text, relief='solid', background='lightyellow')
+        lbl.pack(ipadx=6, ipady=3)
+        try:
+            self.top.wm_geometry(f'+{x}+{y}')
+        except Exception:
+            pass
+
+    def _on_leave(self, event=None):
+        if self.top:
+            try:
+                self.top.destroy()
+            except Exception:
+                pass
+            self.top = None
+
+    def set_text(self, text):
+        self.text = text
+
+
+def attach_tooltip(widget, text):
+    """Attach a tooltip to a widget (idempotent)."""
+    if getattr(widget, '_tooltip_obj', None) is None:
+        widget._tooltip_obj = _Tooltip(widget, text)
+    else:
+        widget._tooltip_obj.set_text(text)
+
 def enforce_mega_retention(m, game_name, keep, log_callback):
     # Ensure SaveSync/game exists; if not, nothing to prune
     root_id = m.get_node_by_type(2)[0]
@@ -99,10 +162,17 @@ def upload_to_mega(game_name, folder_path, log_callback):
         log_callback("[!] MEGA credentials not found.")
         return
 
+    if not _HAVE_MEGA:
+        log_callback("[!] python-mega library not available; cannot upload to MEGA.")
+        return
+
     try:
         with open(creds_path) as f:
             creds = json.load(f)
 
+        if not _HAVE_MEGA:
+            log_callback("[!] python-mega library not available; cannot upload to MEGA.")
+            return
         mega = Mega()
         m = mega.login(creds["email"], creds["password"])
 
@@ -148,6 +218,9 @@ def restore_from_mega(game_name, log_callback):
         with open(creds_path) as f:
             creds = json.load(f)
 
+        if not _HAVE_MEGA:
+            log_callback("[!] python-mega library not available.")
+            return
         mega = Mega()
         m = mega.login(creds["email"], creds["password"])
 
@@ -377,9 +450,20 @@ class SaveSyncApp(tk.Tk):
         settings = self.config.get("_settings", {})
         self.sync_local_var = tk.BooleanVar(value=settings.get("sync_local", True))
         self.sync_mega_var = tk.BooleanVar(value=settings.get("sync_mega", True))
+        self.minimize_tray_var = tk.BooleanVar(value=settings.get("minimize_to_tray", False))
 
         self._init_styles()
         self._build_layout()
+        # Update MEGA-related UI state (disable if mega.py or creds missing)
+        try:
+            self._update_mega_ui_state()
+        except Exception:
+            pass
+        # Bind minimize/iconify to tray handler
+        try:
+            self.bind("<Unmap>", self._on_iconify)
+        except Exception:
+            pass
 
         self.after(500, self.check_and_auto_backup)
         self.protocol("WM_DELETE_WINDOW", self.on_exit)
@@ -447,18 +531,25 @@ class SaveSyncApp(tk.Tk):
         btn_frame.grid(row=1, column=0, columnspan=8, sticky="w", pady=(8, 0))
 
         # First row: backup / restore / cloud restore / reload
-        self.btn_backup = ttk.Button(
-            btn_frame, text="Backup to local and MEGA", command=self.backup, **({"style": primary} if primary else {})
-        )
-        self.btn_restore_local = ttk.Button(
-            btn_frame, text="Restore from local", command=self.restore, **({"style": secondary} if secondary else {})
-        )
-        self.btn_restore_cloud = ttk.Button(
-            btn_frame, text="Restore from MEGA", command=self.restore_from_cloud, **({"style": info} if info else {})
-        )
-        self.btn_reload = ttk.Button(
-            btn_frame, text="Reload Config", command=self.reload_json, **({"style": warning} if warning else {})
-        )
+        btn_kwargs = {}
+        if primary:
+            btn_kwargs["style"] = primary
+        self.btn_backup = ttk.Button(btn_frame, text="Backup to local and MEGA", command=self.backup, **btn_kwargs)
+
+        btn_kwargs = {}
+        if secondary:
+            btn_kwargs["style"] = secondary
+        self.btn_restore_local = ttk.Button(btn_frame, text="Restore from local", command=self.restore, **btn_kwargs)
+
+        btn_kwargs = {}
+        if info:
+            btn_kwargs["style"] = info
+        self.btn_restore_cloud = ttk.Button(btn_frame, text="Restore from MEGA", command=self.restore_from_cloud, **btn_kwargs)
+
+        btn_kwargs = {}
+        if warning:
+            btn_kwargs["style"] = warning
+        self.btn_reload = ttk.Button(btn_frame, text="Reload Config", command=self.reload_json, **btn_kwargs)
 
         self.btn_backup.grid(row=0, column=0, padx=(0, 8), pady=(0, 6))
         self.btn_restore_local.grid(row=0, column=1, padx=(0, 8), pady=(0, 6))
@@ -483,25 +574,35 @@ class SaveSyncApp(tk.Tk):
         self.chk_mega.grid(row=0, column=6, sticky="w", padx=(0, 8))
 
         # Second row: add / remove / exit
-        self.btn_add = ttk.Button(
-            btn_frame, text="Add Game", command=self.add_game, **({"style": primary} if primary else {})
-        )
-        self.btn_remove = ttk.Button(
-            btn_frame, text="Remove Game", command=self.remove_game, **({"style": danger} if danger else {})
-        )
-        self.btn_exit = ttk.Button(
-            btn_frame, text="Exit and Sync", command=self.on_exit, **({"style": danger} if danger else {})
-        )
-        self.btn_list = ttk.Button(
-            btn_frame,
-            text='List Backups',
-            command=self.list_backups,
-            **({"style": info} if info else {})
-        )
+        btn_kwargs = {}
+        if primary:
+            btn_kwargs["style"] = primary
+        self.btn_add = ttk.Button(btn_frame, text="Add Game", command=self.add_game, **btn_kwargs)
+
+        btn_kwargs = {}
+        if danger:
+            btn_kwargs["style"] = danger
+        self.btn_remove = ttk.Button(btn_frame, text="Remove Game", command=self.remove_game, **btn_kwargs)
+
+        btn_kwargs = {}
+        if danger:
+            btn_kwargs["style"] = danger
+        self.btn_exit = ttk.Button(btn_frame, text="Exit and Sync", command=self.on_exit, **btn_kwargs)
+
+        btn_kwargs = {}
+        if info:
+            btn_kwargs["style"] = info
+        self.btn_list = ttk.Button(btn_frame, text='List Backups', command=self.list_backups, **btn_kwargs)
         self.btn_add.grid(row=1, column=0, padx=(0, 8))
         self.btn_remove.grid(row=1, column=1, padx=(0, 8))
         self.btn_exit.grid(row=1, column=2, padx=(0, 8))
         self.btn_list.grid(row=1, column=3, padx=(0, 8))
+        # Options button
+        btn_kwargs = {}
+        if info:
+            btn_kwargs["style"] = info
+        self.btn_options = ttk.Button(btn_frame, text="Options", command=self.show_options_window, **btn_kwargs)
+        self.btn_options.grid(row=1, column=4, padx=(0, 8))
 
         # Activity log panel
         log_frame = ttk.LabelFrame(content, text="Activity")
@@ -561,6 +662,10 @@ class SaveSyncApp(tk.Tk):
             else:
                 self.game_var.set("")
             self.log("[✓] Configuration reloaded successfully.")
+            try:
+                self._update_mega_ui_state()
+            except Exception:
+                pass
         except Exception as e:
             self.log(f"[!] Error reloading config: {e}")
             messagebox.showerror("Error", f"Failed to reload configuration: {e}")
@@ -699,30 +804,34 @@ class SaveSyncApp(tk.Tk):
                 try:
                     with open(MEGA_CREDS) as f:
                         creds = json.load(f)
-                    mega = Mega()
-                    m = mega.login(creds.get("email"), creds.get("password"))
-                    # Ensure SaveSync root exists
-                    base = m.find_path_descriptor('SaveSync')
-                    for game, _ in self.config.items():
-                        if game == "_settings":
-                            continue
-                        # find game folder under SaveSync
-                        game_id = m.find_path_descriptor(f"SaveSync/{game}")
-                        lines.append(f"{game} (cloud):")
-                        if not game_id:
-                            lines.append("  (cloud) (no cloud backups)")
-                            lines.append("")
-                            continue
-                        nodes = m.get_files_in_node(game_id)
-                        ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
-                        # prefer lexicographic timestamp sorting (newest first)
-                        ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
-                        if ts_folders:
-                            for _, n in ts_folders:
-                                lines.append(f"  (cloud) - {n['a']['n']}")
-                        else:
-                            lines.append("  (cloud) (no cloud backups)")
+                    if not _HAVE_MEGA:
+                        lines.append("(cloud) python-mega library not installed; cannot list cloud backups.")
                         lines.append("")
+                    else:
+                        mega = Mega()
+                        m = mega.login(creds.get("email"), creds.get("password"))
+                        # Ensure SaveSync root exists
+                        base = m.find_path_descriptor('SaveSync')
+                        for game, _ in self.config.items():
+                            if game == "_settings":
+                                continue
+                            # find game folder under SaveSync
+                            game_id = m.find_path_descriptor(f"SaveSync/{game}")
+                            lines.append(f"{game} (cloud):")
+                            if not game_id:
+                                lines.append("  (cloud) (no cloud backups)")
+                                lines.append("")
+                                continue
+                            nodes = m.get_files_in_node(game_id)
+                            ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+                            # prefer lexicographic timestamp sorting (newest first)
+                            ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
+                            if ts_folders:
+                                for _, n in ts_folders:
+                                    lines.append(f"  (cloud) - {n['a']['n']}")
+                            else:
+                                lines.append("  (cloud) (no cloud backups)")
+                            lines.append("")
                 except Exception as e:
                     # Append error note for cloud listing
                     lines.append(f"(cloud) Unable to query MEGA: {e}")
@@ -755,6 +864,7 @@ class SaveSyncApp(tk.Tk):
         for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud,
                   self.btn_reload, self.btn_exit, self.btn_add,
                   getattr(self, "btn_remove", None), getattr(self, "btn_list", None),
+                  getattr(self, "btn_options", None),
                   getattr(self, "chk_local", None), getattr(self, "chk_mega", None)):
             if b:
                 b.config(state=state)
@@ -797,6 +907,181 @@ class SaveSyncApp(tk.Tk):
                 self.run_in_bg(lambda g=game: backup_game(g, self.log))
             else:
                 self.log(f"[=] No changes in {game}")
+
+    # --- Tray and Options UI ---
+    def show_options_window(self):
+        win = tk.Toplevel(self)
+        win.title("Options")
+        win.transient(self)
+        win.grab_set()
+
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        # Minimize to tray toggle
+        ttk.Label(frm, text="Minimize to tray:").grid(row=0, column=0, sticky="w")
+        chk = ttk.Checkbutton(frm, text="Enable minimize to tray", variable=self.minimize_tray_var)
+        chk.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        # MEGA credentials button
+        ttk.Label(frm, text="MEGA:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        btn_creds = ttk.Button(frm, text="Set MEGA Credentials", command=self.set_mega_credentials)
+        btn_creds.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        # Save/Close
+        def on_save():
+            s = self.config.setdefault("_settings", {})
+            s["minimize_to_tray"] = bool(self.minimize_tray_var.get())
+            try:
+                save_config(self.config)
+                self.log("[✓] Options saved.")
+            except Exception as e:
+                self.log(f"[!] Failed to save options: {e}")
+                messagebox.showerror("Error", f"Failed to save options: {e}")
+            win.destroy()
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+        ttk.Button(btn_frame, text="Save", command=on_save).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side="left", padx=6)
+
+    def set_mega_credentials(self):
+        # Prompt for email and password and save securely to MEGA_CREDS
+        email = simpledialog.askstring("MEGA Credentials", "Email:", parent=self)
+        if not email:
+            self.log("[!] MEGA email entry cancelled.")
+            return
+        password = simpledialog.askstring("MEGA Credentials", "Password:", parent=self, show="*")
+        if password is None:
+            self.log("[!] MEGA password entry cancelled.")
+            return
+
+        try:
+            os.makedirs(os.path.dirname(MEGA_CREDS), exist_ok=True)
+            with open(MEGA_CREDS, "w") as f:
+                json.dump({"email": email, "password": password}, f, indent=4)
+            # restrict permissions
+            try:
+                os.chmod(MEGA_CREDS, 0o600)
+            except Exception:
+                pass
+            self.log("[✓] Saved MEGA credentials.")
+            try:
+                self._update_mega_ui_state()
+            except Exception:
+                pass
+        except Exception as e:
+            self.log(f"[!] Failed to save MEGA credentials: {e}")
+            messagebox.showerror("Error", f"Failed to save MEGA credentials: {e}")
+
+    def _update_mega_ui_state(self):
+        """Enable/disable MEGA-related widgets depending on availability.
+
+        Disables the MEGA checkbox and cloud-restore button when the
+        python-mega library isn't installed or credentials file is missing.
+        """
+        have_lib = bool(_HAVE_MEGA)
+        creds_ok = os.path.exists(MEGA_CREDS)
+        enabled = have_lib and creds_ok
+        state = "normal" if enabled else "disabled"
+        # chk_mega is a Checkbutton (ttk) and btn_restore_cloud is a Button
+        try:
+            if getattr(self, 'chk_mega', None):
+                self.chk_mega.config(state=state)
+            if getattr(self, 'btn_restore_cloud', None):
+                self.btn_restore_cloud.config(state=state)
+            # Also grey out the List Backups button when MEGA cloud features aren't available
+            if getattr(self, 'btn_list', None):
+                self.btn_list.config(state=state)
+            # attach dynamic tooltip explaining why disabled
+            if not enabled:
+                if not have_lib:
+                    reason = 'python-mega not installed. Install with: pip3 install mega-x'
+                elif not creds_ok:
+                    reason = 'MEGA credentials missing. Open Options → Set MEGA Credentials.'
+                else:
+                    reason = 'MEGA unavailable.'
+            else:
+                reason = ''
+            # The main backup button still performs local backups; attach a tooltip when MEGA unavailable
+            if getattr(self, 'btn_backup', None):
+                attach_tooltip(self.btn_backup, reason if not enabled else '')
+            try:
+                if getattr(self, 'chk_mega', None):
+                    attach_tooltip(self.chk_mega, reason)
+                if getattr(self, 'btn_restore_cloud', None):
+                    attach_tooltip(self.btn_restore_cloud, reason)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _make_tray_image(self):
+        # Create a simple 64x64 icon programmatically
+        if Image is None or ImageDraw is None:
+            return None
+        img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((4, 4, 60, 60), fill=(40, 120, 200, 255))
+        draw.rectangle((20, 24, 44, 40), fill=(255, 255, 255, 255))
+        return img
+
+    def _start_tray(self):
+        if not _HAVE_PYSTRAY:
+            self.log("[!] pystray not available; tray icon disabled.")
+            return
+        if getattr(self, 'tray_icon', None):
+            return
+        img = self._make_tray_image()
+        menu = pystray.Menu(
+            pystray.MenuItem('Restore', lambda icon, item: self.after(0, self._restore_from_tray)),
+            pystray.MenuItem('Quit', lambda icon, item: self.after(0, self._quit_from_tray))
+        )
+        icon = pystray.Icon('savesync', img, 'SaveSync', menu)
+        self.tray_icon = icon
+
+        def run_icon():
+            try:
+                icon.run()
+            except Exception as e:
+                self.log(f"[!] Tray icon failed: {e}")
+
+        self.tray_thread = threading.Thread(target=run_icon, daemon=True)
+        self.tray_thread.start()
+
+    def _stop_tray(self):
+        icon = getattr(self, 'tray_icon', None)
+        if icon:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+        self.tray_icon = None
+
+    def _restore_from_tray(self):
+        try:
+            self.deiconify()
+            self._stop_tray()
+        except Exception:
+            pass
+
+    def _quit_from_tray(self):
+        try:
+            self._stop_tray()
+        finally:
+            self.destroy()
+
+    def _on_iconify(self, event=None):
+        # Called when window is minimized/iconified
+        try:
+            settings = self.config.get("_settings", {})
+            if settings.get("minimize_to_tray", False):
+                # hide main window and start tray
+                self.withdraw()
+                self._start_tray()
+        except Exception:
+            pass
+
 
     def add_game(self):
         name = simpledialog.askstring("Add Game", "Enter game name:")

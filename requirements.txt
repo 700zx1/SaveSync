@@ -1,3 +1,5 @@
 mega-x
 tenacity>=9.1.2
 ttkbootstrap
+pystray
+pillow
