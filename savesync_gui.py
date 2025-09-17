@@ -631,6 +631,25 @@ class SaveSyncApp(tk.Tk):
         self.progress = ttk.Progressbar(status_bar, mode="indeterminate", length=220)
         self.progress.pack(side="right", padx=(12, 0))
 
+        # Menu bar so Options is always reachable
+        try:
+            menubar = tk.Menu(self)
+            file_menu = tk.Menu(menubar, tearoff=0)
+            file_menu.add_command(label="Options...", command=self.show_options_window, accelerator="Alt+O")
+            file_menu.add_separator()
+            file_menu.add_command(label="Exit", command=self.on_exit)
+            menubar.add_cascade(label="File", menu=file_menu)
+            # Attach menubar
+            self.config(menu=menubar)
+            # Bind accelerator (Alt+O) to open options
+            try:
+                self.bind_all('<Alt-o>', lambda e: self.show_options_window())
+                self.bind_all('<Alt-O>', lambda e: self.show_options_window())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def log(self, message):
         def do():
             timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
