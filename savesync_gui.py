@@ -6,7 +6,13 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, filedialog
 from tkinter import ttk
 import threading
-from mega import Mega
+try:
+    from mega import Mega
+    _HAVE_MEGA = True
+except Exception:
+    Mega = None
+    _HAVE_MEGA = False
+import tempfile
 
 try:
     import ttkbootstrap as ttkb  # optional modern theme
@@ -181,41 +187,75 @@ def restore_from_mega(game_name, log_callback):
             shutil.rmtree(restore_to)
         os.makedirs(restore_to, exist_ok=True)
 
-        temp_dir = os.path.join("/tmp", f"{game_name}_{selected}")
-        os.makedirs(temp_dir, exist_ok=True)
-
-        files_map = m.get_files_in_node(selected_id)
-        file_items = [(fid, n) for fid, n in files_map.items() if n['t'] == 0]
-        for fid, fobj in file_items:
-            # download expects a (id, dict) tuple
-            m.download((fid, fobj), dest_path=temp_dir)
-            src = os.path.join(temp_dir, fobj['a']['n'])
-            dst = os.path.join(restore_to, fobj['a']['n'])
-            shutil.move(src, dst)
-            log_callback(f"[↓] Restored {fobj['a']['n']} to {restore_to}")
-
-        shutil.rmtree(temp_dir)
+        # use a secure temporary directory for downloads
+        temp_dir = tempfile.mkdtemp(prefix=f"{game_name}_{selected}_")
+        try:
+            files_map = m.get_files_in_node(selected_id)
+            file_items = [(fid, n) for fid, n in files_map.items() if n['t'] == 0]
+            for fid, fobj in file_items:
+                # download expects a (id, dict) tuple
+                m.download((fid, fobj), dest_path=temp_dir)
+                src = os.path.join(temp_dir, fobj['a']['n'])
+                dst = os.path.join(restore_to, fobj['a']['n'])
+                shutil.move(src, dst)
+                log_callback(f"[↓] Restored {fobj['a']['n']} to {restore_to}")
+        finally:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
         log_callback(f"[✓] Cloud restore complete to {restore_to}")
     except Exception as e:
         log_callback(f"[!] MEGA restore failed: {e}")
 
 def backup_game(game_name, log_callback):
-    config = load_config()
-    game_info = config.get(game_name)
-    if not game_info:
-        log_callback(f"[!] Game '{game_name}' not in config.")
-        return
+    try:
+        config = load_config()
+        game_info = config.get(game_name)
+        if not game_info:
+            log_callback(f"[!] Game '{game_name}' not in config.")
+            return
 
-    src = os.path.expanduser(game_info['save_path'])
-    if not os.path.exists(src):
-        log_callback(f"[!] Save path not found: {src}")
-        return
+        settings = config.get("_settings", {})
+        sync_local = settings.get("sync_local", True)
+        sync_mega = settings.get("sync_mega", True)
 
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    dest = os.path.join(BACKUP_ROOT, game_name, timestamp)
-    shutil.copytree(src, dest)
-    log_callback(f"[✓] Backed up to {dest}")
-    upload_to_mega(game_name, dest, log_callback)
+        if not sync_local and not sync_mega:
+            log_callback("[!] Both local and MEGA sync are disabled; skipping backup.")
+            return
+
+        src = os.path.expanduser(game_info['save_path'])
+        if not os.path.exists(src):
+            log_callback(f"[!] Save path not found: {src}")
+            return
+
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        # If local sync is enabled, create persistent backup under BACKUP_ROOT.
+        if sync_local:
+            dest_parent = os.path.join(BACKUP_ROOT, game_name)
+            os.makedirs(dest_parent, exist_ok=True)
+            dest = os.path.join(dest_parent, timestamp)
+            shutil.copytree(src, dest)
+            log_callback(f"[✓] Backed up to {dest}")
+            # Upload uses this persistent folder.
+            if sync_mega:
+                upload_to_mega(game_name, dest, log_callback)
+        else:
+            # Local disabled: create a temporary folder, upload if MEGA enabled, then remove.
+            temp_parent = tempfile.mkdtemp(prefix=f"{game_name}_")
+            try:
+                temp_dest = os.path.join(temp_parent, timestamp)
+                shutil.copytree(src, temp_dest)
+                log_callback(f"[✓] Created temporary backup for upload: {temp_dest}")
+                if sync_mega:
+                    upload_to_mega(game_name, temp_dest, log_callback)
+            finally:
+                try:
+                    shutil.rmtree(temp_parent)
+                except Exception:
+                    pass
+    except Exception as e:
+        log_callback(f"[!] Backup failed: {e}")
 
 def restore_game(game_name, log_callback):
     backup_path = os.path.join(BACKUP_ROOT, game_name)
@@ -263,6 +303,12 @@ class SaveSyncApp(tk.Tk):
         self.minsize(820, 520)
 
         self.config = load_config()
+
+        # Sync toggles (persisted under _settings in config)
+        settings = self.config.get("_settings", {})
+        self.sync_local_var = tk.BooleanVar(value=settings.get("sync_local", True))
+        self.sync_mega_var = tk.BooleanVar(value=settings.get("sync_mega", True))
+
         self._init_styles()
         self._build_layout()
 
@@ -305,15 +351,16 @@ class SaveSyncApp(tk.Tk):
         ttk.Label(ctrls, text="Select Game:").grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         self.game_var = tk.StringVar(self)
-        # safe default if config is empty
-        if self.config:
-            self.game_var.set(next(iter(self.config)))
+        # safe default if config is empty; exclude internal "_settings" key
+        game_keys = [k for k in self.config.keys() if k != "_settings"]
+        if game_keys:
+            self.game_var.set(game_keys[0])
         else:
             self.game_var.set("")
         self.game_select = ttk.Combobox(
             ctrls,
             textvariable=self.game_var,
-            values=list(self.config.keys()),
+            values=game_keys,
             state="readonly",
             width=28,
         )
@@ -348,6 +395,23 @@ class SaveSyncApp(tk.Tk):
         self.btn_restore_local.grid(row=0, column=1, padx=(0, 8), pady=(0, 6))
         self.btn_restore_cloud.grid(row=0, column=2, padx=(0, 8), pady=(0, 6))
         self.btn_reload.grid(row=0, column=3, padx=(0, 8), pady=(0, 6))
+
+        # Sync toggle checkbuttons
+        ttk.Label(ctrls, text="Sync:").grid(row=0, column=4, sticky="e", padx=(12, 4))
+        self.chk_local = ttk.Checkbutton(
+            ctrls,
+            text="Local",
+            variable=self.sync_local_var,
+            command=lambda: self._on_toggle_sync("sync_local", self.sync_local_var.get())
+        )
+        self.chk_mega = ttk.Checkbutton(
+            ctrls,
+            text="MEGA",
+            variable=self.sync_mega_var,
+            command=lambda: self._on_toggle_sync("sync_mega", self.sync_mega_var.get())
+        )
+        self.chk_local.grid(row=0, column=5, sticky="w", padx=(0, 8))
+        self.chk_mega.grid(row=0, column=6, sticky="w", padx=(0, 8))
 
         # Second row: add / remove / exit
         self.btn_add = ttk.Button(
@@ -420,10 +484,11 @@ class SaveSyncApp(tk.Tk):
     def reload_json(self):
         try:
             self.config = load_config()
-            # Update game selector values
-            self.game_select['values'] = list(self.config.keys())
-            if self.config:
-                self.game_var.set(next(iter(self.config)))
+            # Update game selector values (exclude internal _settings)
+            game_keys = [k for k in self.config.keys() if k != "_settings"]
+            self.game_select['values'] = game_keys
+            if game_keys:
+                self.game_var.set(game_keys[0])
             else:
                 self.game_var.set("")
             self.log("[✓] Configuration reloaded successfully.")
@@ -441,6 +506,11 @@ class SaveSyncApp(tk.Tk):
 
     def restore_from_cloud(self):
         game = self.game_var.get()
+        settings = self.config.get("_settings", {})
+        if not settings.get("sync_mega", True):
+            self.log("[!] MEGA sync is disabled; cloud restore blocked.")
+            messagebox.showinfo("MEGA Disabled", "MEGA sync is disabled in settings.")
+            return
         self.run_in_bg(lambda: restore_from_mega(game, self.log))
     
     def list_backups(self):
@@ -449,55 +519,70 @@ class SaveSyncApp(tk.Tk):
 
     def _list_backups_worker(self):
         lines = []
+        settings = self.config.get("_settings", {})
+        sync_local = settings.get("sync_local", True)
+        sync_mega = settings.get("sync_mega", True)
+
         # Local backups
         for game, info in self.config.items():
+            if game == "_settings":
+                continue
             lines.append(f"{game}:")
             backup_dir = os.path.join(BACKUP_ROOT, game)
-            if os.path.exists(backup_dir):
-                items = sorted(os.listdir(backup_dir), reverse=True)
-                if items:
-                    for b in items:
-                        lines.append(f"  (local) - {b}")
+            if not sync_local:
+                lines.append("  (local) DISABLED")
+            else:
+                if os.path.exists(backup_dir):
+                    items = sorted(os.listdir(backup_dir), reverse=True)
+                    if items:
+                        for b in items:
+                            lines.append(f"  (local) - {b}")
+                    else:
+                        lines.append("  (local) (no local backups)")
                 else:
                     lines.append("  (local) (no local backups)")
-            else:
-                lines.append("  (local) (no local backups)")
             lines.append("")  # blank line between games
 
-        # Cloud backups via MEGA (if credentials present)
-        if os.path.exists(MEGA_CREDS):
-            try:
-                with open(MEGA_CREDS) as f:
-                    creds = json.load(f)
-                mega = Mega()
-                m = mega.login(creds.get("email"), creds.get("password"))
-                # Ensure SaveSync root exists
-                base = m.find_path_descriptor('SaveSync')
-                for game, _ in self.config.items():
-                    # find game folder under SaveSync
-                    game_id = m.find_path_descriptor(f"SaveSync/{game}")
-                    lines.append(f"{game} (cloud):")
-                    if not game_id:
-                        lines.append("  (cloud) (no cloud backups)")
-                        lines.append("")
-                        continue
-                    nodes = m.get_files_in_node(game_id)
-                    ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
-                    # prefer lexicographic timestamp sorting (newest first)
-                    ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
-                    if ts_folders:
-                        for _, n in ts_folders:
-                            lines.append(f"  (cloud) - {n['a']['n']}")
-                    else:
-                        lines.append("  (cloud) (no cloud backups)")
-                    lines.append("")
-            except Exception as e:
-                # Append error note for cloud listing
-                lines.append(f"(cloud) Unable to query MEGA: {e}")
-                lines.append("")
-        else:
-            lines.append("(cloud) MEGA credentials not configured.")
+        # Cloud backups via MEGA (if credentials present and enabled)
+        if not sync_mega:
+            lines.append("(cloud) MEGA sync is DISABLED.")
             lines.append("")
+        else:
+            if os.path.exists(MEGA_CREDS):
+                try:
+                    with open(MEGA_CREDS) as f:
+                        creds = json.load(f)
+                    mega = Mega()
+                    m = mega.login(creds.get("email"), creds.get("password"))
+                    # Ensure SaveSync root exists
+                    base = m.find_path_descriptor('SaveSync')
+                    for game, _ in self.config.items():
+                        if game == "_settings":
+                            continue
+                        # find game folder under SaveSync
+                        game_id = m.find_path_descriptor(f"SaveSync/{game}")
+                        lines.append(f"{game} (cloud):")
+                        if not game_id:
+                            lines.append("  (cloud) (no cloud backups)")
+                            lines.append("")
+                            continue
+                        nodes = m.get_files_in_node(game_id)
+                        ts_folders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+                        # prefer lexicographic timestamp sorting (newest first)
+                        ts_folders.sort(key=lambda x: x[1]['a']['n'], reverse=True)
+                        if ts_folders:
+                            for _, n in ts_folders:
+                                lines.append(f"  (cloud) - {n['a']['n']}")
+                        else:
+                            lines.append("  (cloud) (no cloud backups)")
+                        lines.append("")
+                except Exception as e:
+                    # Append error note for cloud listing
+                    lines.append(f"(cloud) Unable to query MEGA: {e}")
+                    lines.append("")
+            else:
+                lines.append("(cloud) MEGA credentials not configured.")
+                lines.append("")
 
         message = "\n".join(lines) if lines else "No games configured."
 
@@ -522,7 +607,8 @@ class SaveSyncApp(tk.Tk):
         state = "disabled" if busy else "normal"
         for b in (self.btn_backup, self.btn_restore_local, self.btn_restore_cloud,
                   self.btn_reload, self.btn_exit, self.btn_add,
-                  getattr(self, "btn_remove", None), getattr(self, "btn_list", None)):
+                  getattr(self, "btn_remove", None), getattr(self, "btn_list", None),
+                  getattr(self, "chk_local", None), getattr(self, "chk_mega", None)):
             if b:
                 b.config(state=state)
         if busy:
@@ -541,7 +627,14 @@ class SaveSyncApp(tk.Tk):
 
     def check_and_auto_backup(self):
         self.log("Checking for save changes...")
+        settings = self.config.get("_settings", {})
+        if not settings.get("sync_local", True) and not settings.get("sync_mega", True):
+            self.log("[!] Both local and MEGA sync disabled; skipping auto backups.")
+            return
+
         for game, info in self.config.items():
+            if game == "_settings":
+                continue
             save_path = os.path.expanduser(info['save_path'])
             if not os.path.exists(save_path):
                 self.log(f"[!] Save path missing for {game}")
@@ -554,7 +647,7 @@ class SaveSyncApp(tk.Tk):
 
             if not latest_backup or folder_differs(save_path, latest_backup):
                 self.log(f"[✓] Change detected in {game}, creating backup...")
-                self.run_in_bg(lambda: backup_game(game, self.log))
+                self.run_in_bg(lambda g=game: backup_game(g, self.log))
             else:
                 self.log(f"[=] No changes in {game}")
 
@@ -562,6 +655,11 @@ class SaveSyncApp(tk.Tk):
         name = simpledialog.askstring("Add Game", "Enter game name:")
         if not name:
             self.log("[!] Add game cancelled or no name provided.")
+            return
+
+        if name == "_settings":
+            messagebox.showerror("Invalid name", "The name '_settings' is reserved.")
+            self.log("[!] Attempted to add reserved name '_settings'.")
             return
 
         folder = filedialog.askdirectory(title=f"Select save folder for {name}")
@@ -578,7 +676,7 @@ class SaveSyncApp(tk.Tk):
         try:
             save_config(self.config)
             # refresh UI
-            self.game_select['values'] = list(self.config.keys())
+            self.game_select['values'] = [k for k in self.config.keys() if k != "_settings"]
             self.game_var.set(name)
             self.log(f"[✓] Added {name} -> {folder} to config.")
         except Exception as e:
@@ -617,16 +715,24 @@ class SaveSyncApp(tk.Tk):
             self.log(f"[!] Failed to remove game: {e}")
             messagebox.showerror("Error", f"Failed to remove game: {e}")
 
-if __name__ == "__main__":
-    os.makedirs(BACKUP_ROOT, exist_ok=True)
-    if not os.path.exists(CONFIG_FILE):
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump({
-                "Skyrim": {"save_path": "~/SkyrimSaves"},
-                "Red Dead 2": {"save_path": "~/.wine/drive_c/users/you/Documents/RDR2/Profiles"}
-            }, f, indent=4)
-        print(f"Created default config at {CONFIG_FILE}")
+    def _on_toggle_sync(self, key, value):
+        # Persist toggle to config under "_settings"
+        s = self.config.setdefault("_settings", {})
+        s[key] = bool(value)
+        try:
+            save_config(self.config)
+            self.log(f"[✓] Set {key} = {s[key]}")
+        except Exception as e:
+            self.log(f"[!] Failed to save setting {key}: {e}")
+            messagebox.showerror("Error", f"Failed to save setting {key}: {e}")
 
-    app = SaveSyncApp()
-    app.mainloop()
+# Initialize default config if not present
+if not os.path.exists(CONFIG_FILE):
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump({
+            "Skyrim": {"save_path": "~/SkyrimSaves"},
+            "Red Dead 2": {"save_path": "~/.wine/drive_c/users/you/Documents/RDR2/Profiles"},
+            "_settings": {"sync_local": True, "sync_mega": True}
+        }, f, indent=4)
+    print(f"Created default config at {CONFIG_FILE}")
