@@ -275,15 +275,84 @@ def restore_game(game_name, log_callback):
         log_callback(f"[!] Invalid or cancelled backup selection.")
         return
 
-    config = load_config()
-    restore_to = os.path.expanduser(config[game_name]['save_path'])
-    full_backup_path = os.path.join(backup_path, selected)
+    restore_game_selected(game_name, selected, log_callback)
 
-    if os.path.exists(restore_to):
-        shutil.rmtree(restore_to)
+def restore_game_selected(game_name, selected, log_callback):
+    """Perform the actual local restore given a selected backup name."""
+    try:
+        backup_path = os.path.join(BACKUP_ROOT, game_name)
+        full_backup_path = os.path.join(backup_path, selected)
+        if not os.path.exists(full_backup_path):
+            log_callback(f"[!] Selected backup not found: {full_backup_path}")
+            return
 
-    shutil.copytree(full_backup_path, restore_to)
-    log_callback(f"[✓] Restored to {restore_to}")
+        config = load_config()
+        restore_to = os.path.expanduser(config[game_name]['save_path'])
+        if os.path.exists(restore_to):
+            shutil.rmtree(restore_to)
+        shutil.copytree(full_backup_path, restore_to)
+        log_callback(f"[✓] Restored to {restore_to}")
+    except Exception as e:
+        log_callback(f"[!] Local restore failed: {e}")
+
+def _mega_get_backups(game_name):
+    """Return list of (name, node_id) for cloud backups; raises on failure."""
+    if not os.path.exists(MEGA_CREDS):
+        raise RuntimeError("MEGA credentials not found.")
+    if not _HAVE_MEGA:
+        raise RuntimeError("python-mega library not available.")
+    with open(MEGA_CREDS) as f:
+        creds = json.load(f)
+    mega = Mega()
+    m = mega.login(creds["email"], creds["password"])
+    game_folder_id = m.find_path_descriptor(f"SaveSync/{game_name}")
+    if not game_folder_id:
+        return []
+    nodes = m.get_files_in_node(game_folder_id)
+    subfolders = [(nid, n) for nid, n in nodes.items() if n['t'] == 1]
+    subfolders.sort(key=lambda x: x[1].get('ts', 0), reverse=True)
+    return [(n['a']['n'], nid) for nid, n in subfolders]
+
+def restore_from_mega_by_id(game_name, node_id, log_callback):
+    """Download files from the MEGA node_id and restore into the game's save path."""
+    try:
+        if not os.path.exists(MEGA_CREDS):
+            log_callback("[!] MEGA credentials not found.")
+            return
+        with open(MEGA_CREDS) as f:
+            creds = json.load(f)
+        if not _HAVE_MEGA:
+            log_callback("[!] python-mega library not available.")
+            return
+        mega = Mega()
+        m = mega.login(creds["email"], creds["password"])
+
+        config = load_config()
+        restore_to = os.path.expanduser(config[game_name]['save_path'])
+        if os.path.exists(restore_to):
+            shutil.rmtree(restore_to)
+        os.makedirs(restore_to, exist_ok=True)
+
+        temp_dir = tempfile.mkdtemp(prefix=f"{game_name}_restore_")
+        try:
+            files_map = m.get_files_in_node(node_id)
+            file_items = [(fid, n) for fid, n in files_map.items() if n['t'] == 0]
+            for fid, fobj in file_items:
+                m.download((fid, fobj), dest_path=temp_dir)
+                src = os.path.join(temp_dir, fobj['a']['n'])
+                dst = os.path.join(restore_to, fobj['a']['n'])
+                if os.path.exists(src):
+                    shutil.move(src, dst)
+                    log_callback(f"[↓] Restored {fobj['a']['n']} to {restore_to}")
+        finally:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+
+        log_callback(f"[✓] Cloud restore complete to {restore_to}")
+    except Exception as e:
+        log_callback(f"[!] MEGA restore failed: {e}")
 
 class SaveSyncApp(tk.Tk):
     def __init__(self):
@@ -500,9 +569,54 @@ class SaveSyncApp(tk.Tk):
         game = self.game_var.get()
         self.run_in_bg(lambda: backup_game(game, self.log))
 
+    def ask_selection(self, title, prompt, options):
+        """Show a modal selection list and return the selected item (or None)."""
+        sel = {"value": None}
+        win = tk.Toplevel(self)
+        win.transient(self)
+        win.title(title)
+        win.grab_set()
+        ttk.Label(win, text=prompt, wraplength=560).pack(padx=12, pady=(12, 6))
+        lb = tk.Listbox(win, height=min(12, max(3, len(options))), exportselection=False)
+        for opt in options:
+            lb.insert("end", opt)
+        lb.pack(padx=12, pady=(0, 12), fill="both", expand=True)
+        lb.focus_set()
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=(0, 12))
+        def on_ok():
+            sel_idx = lb.curselection()
+            if sel_idx:
+                sel["value"] = lb.get(sel_idx[0])
+            win.destroy()
+        def on_cancel():
+            win.destroy()
+
+        ttk.Button(btn_frame, text="OK", command=on_ok).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side="left", padx=6)
+
+        self.wait_window(win)
+        return sel["value"]
+
     def restore(self):
         game = self.game_var.get()
-        restore_game(game, self.log)
+        backup_path = os.path.join(BACKUP_ROOT, game)
+        if not os.path.exists(backup_path):
+            self.log(f"[!] No backups found for {game}")
+            return
+        backups = sorted(os.listdir(backup_path), reverse=True)
+        if not backups:
+            self.log(f"[!] No backups available.")
+            return
+
+        selected = self.ask_selection("Choose Backup", "Select a backup to restore:", backups)
+        if not selected:
+            self.log("[!] Local restore cancelled.")
+            return
+
+        # Run the actual restore in background
+        self.run_in_bg(lambda: restore_game_selected(game, selected, self.log))
 
     def restore_from_cloud(self):
         game = self.game_var.get()
@@ -511,8 +625,41 @@ class SaveSyncApp(tk.Tk):
             self.log("[!] MEGA sync is disabled; cloud restore blocked.")
             messagebox.showinfo("MEGA Disabled", "MEGA sync is disabled in settings.")
             return
-        self.run_in_bg(lambda: restore_from_mega(game, self.log))
-    
+
+        # Fetch backup list in a background thread, prompt selection on main thread,
+        # then perform restore in background.
+        def fetch_worker():
+            try:
+                pairs = _mega_get_backups(game)  # list of (name, node_id)
+            except Exception as e:
+                self.after(0, lambda: self.log(f"[!] Could not list MEGA backups: {e}"))
+                self.after(0, lambda: self.set_busy(False))
+                return
+
+            if not pairs:
+                self.after(0, lambda: self.log(f"[!] No cloud backups available for {game}"))
+                self.after(0, lambda: self.set_busy(False))
+                return
+
+            names = [n for n, _ in pairs]
+            def on_main():
+                selected = self.ask_selection("Restore from MEGA", "Select a cloud backup to restore:", names)
+                if not selected:
+                    self.log("[!] Cloud restore cancelled.")
+                    return
+                node_map = dict(pairs)
+                node_id = node_map.get(selected)
+                if not node_id:
+                    self.log("[!] Selected cloud backup not found.")
+                    return
+                # Run the restore in background
+                self.run_in_bg(lambda: restore_from_mega_by_id(game, node_id, self.log))
+            self.after(0, on_main)
+            self.after(0, lambda: self.set_busy(False))
+
+        self.set_busy(True)
+        threading.Thread(target=fetch_worker, daemon=True).start()
+
     def list_backups(self):
         # Run listing in background to avoid blocking UI
         self.run_in_bg(self._list_backups_worker)
