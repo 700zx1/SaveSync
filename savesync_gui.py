@@ -736,3 +736,11 @@ if not os.path.exists(CONFIG_FILE):
             "_settings": {"sync_local": True, "sync_mega": True}
         }, f, indent=4)
     print(f"Created default config at {CONFIG_FILE}")
+
+if __name__ == "__main__":
+    try:
+        app = SaveSyncApp()
+        app.mainloop()
+    except Exception as e:
+        print(f"Fatal error starting GUI: {e}")
+        raise
