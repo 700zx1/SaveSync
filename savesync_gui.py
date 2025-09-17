@@ -13,6 +13,7 @@ except Exception:
     Mega = None
     _HAVE_MEGA = False
 import tempfile
+import traceback
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -1046,137 +1047,187 @@ class SaveSyncApp(tk.Tk):
         return img
 
     def _start_tray(self):
+        self.log("[Tray] _start_tray() called")
         if not _HAVE_PYSTRAY:
-            self.log("[!] pystray not available; tray icon disabled.")
+            self.log("[Tray] pystray not available; tray icon disabled.")
             return
         if getattr(self, 'tray_icon', None):
+            self.log("[Tray] tray_icon already exists; skipping start.")
             return
 
+        # Build an icon image (fallback to a simple placeholder if possible)
         img = self._make_tray_image()
-        # If image creation failed but PIL is available, create a simple placeholder.
-        if img is None and Image is not None:
-            try:
-                img = Image.new('RGBA', (64, 64), (40, 120, 200, 255))
-            except Exception:
-                img = None
+        if img is None:
+            self.log("[Tray] _make_tray_image() returned None")
+            if Image is not None:
+                try:
+                    img = Image.new('RGBA', (64, 64), (40, 120, 200, 255))
+                    self.log("[Tray] Created placeholder PIL image")
+                except Exception as e:
+                    self.log(f"[Tray] Failed to create placeholder image: {e}")
+                    self.log(traceback.format_exc())
+                    img = None
 
-        # Define handlers with the signature pystray expects (icon, item for menu, icon for default).
+        # Handlers (pystray expects signature (icon, item) for menu callbacks)
         def _on_restore(icon, item=None):
-            self.log(f"[Tray] Restore triggered from {'menu' if item else 'icon click'}")
+            self.log("[Tray] menu callback: Restore invoked")
             try:
                 self.after(0, self._restore_from_tray)
             except Exception as e:
-                self.log(f"[!] Tray restore error: {e}")
+                self.log(f"[!] Tray restore schedule failed: {e}")
+                self.log(traceback.format_exc())
 
-        def _on_quit(icon, item):
-            self.log("[Tray] Quit triggered from menu")
+        def _on_quit(icon, item=None):
+            self.log("[Tray] menu callback: Quit invoked")
             try:
                 self.after(0, self._quit_from_tray)
             except Exception as e:
-                self.log(f"[!] Tray quit error: {e}")
+                self.log(f"[!] Tray quit schedule failed: {e}")
+                self.log(traceback.format_exc())
 
         try:
+            self.log("[Tray] Creating pystray.Icon...")
+            # Create icon and assign menu explicitly (some backends require this)
+            icon = pystray.Icon('savesync', img, 'SaveSync')
             menu = pystray.Menu(
                 pystray.MenuItem('Restore', _on_restore),
                 pystray.MenuItem('Quit', _on_quit)
             )
-            icon = pystray.Icon('savesync', img, 'SaveSync', menu)
-            self.tray_icon = icon
-            icon.default_action = _on_restore
+            icon.menu = menu
+            # Some backends pick up title/visible attributes better when set explicitly
+            try:
+                icon.title = "SaveSync"
+            except Exception:
+                pass
             try:
                 icon.visible = True
             except Exception:
                 pass
+
+            self.tray_icon = icon
+            self.log("[Tray] Icon object created and stored on self.tray_icon")
         except Exception as e:
             self.log(f"[!] Failed to create tray icon: {e}")
+            self.log(traceback.format_exc())
             return
 
         def run_icon():
+            self.log("[Tray] Tray loop thread starting")
             try:
-                # Prefer run_detached() if available (non-blocking internal loop)
-                if hasattr(icon, "run_detached"):
-                    icon.run_detached()
-                else:
-                    icon.run()
+                # Use run() in a dedicated thread for broader backend compatibility
+                icon.run()
             except Exception as e:
-                self.log(f"[!] Tray icon failed: {e}")
+                self.log(f"[!] Tray icon loop failed: {e}")
+                self.log(traceback.format_exc())
+            finally:
+                self.log("[Tray] Tray loop ended")
 
+        # Start the icon loop in a daemon thread so it won't block exit
         self.tray_thread = threading.Thread(target=run_icon, daemon=True)
         self.tray_thread.start()
-        self.log("[Tray] Tray icon started")
+        self.log("[Tray] Tray icon thread started")
 
     def _stop_tray(self):
+        self.log("[Tray] _stop_tray() called")
         icon = getattr(self, 'tray_icon', None)
         if icon:
             try:
-                # Attempt to stop the icon event loop in a safe way
                 stop_fn = getattr(icon, "stop", None)
                 if callable(stop_fn):
                     try:
+                        self.log("[Tray] calling icon.stop()")
                         stop_fn()
+                        self.log("[Tray] icon.stop() returned")
                     except Exception:
                         # some backends may require calling icon.visible = False first
                         try:
+                            self.log("[Tray] icon.stop() raised; attempting icon.visible=False")
                             icon.visible = False
                         except Exception:
                             pass
                 else:
                     try:
+                        self.log("[Tray] icon.stop() not present; setting icon.visible = False")
                         icon.visible = False
                     except Exception:
                         pass
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[Tray] Unexpected error stopping tray icon: {e}")
+                self.log(traceback.format_exc())
+        else:
+            self.log("[Tray] No tray icon to stop")
         self.tray_icon = None
+        self.log("[Tray] tray_icon reference cleared")
 
     def _restore_from_tray(self):
+        self.log("[Tray] _restore_from_tray() called")
         try:
             # Bring the window back, raise it and give it focus.
+            if getattr(self, 'tray_icon', None):
+                self.log("[Tray] Stopping tray icon before restore")
+            else:
+                self.log("[Tray] No tray_icon found at restore time")
             self.deiconify()
+            self.log("[Tray] deiconify() called")
             try:
                 self.lift()
-            except Exception:
-                pass
+                self.log("[Tray] lift() called")
+            except Exception as e:
+                self.log(f"[Tray] lift() failed: {e}")
+                self.log(traceback.format_exc())
             try:
                 self.focus_force()
-            except Exception:
-                pass
-            # Some WMs ignore lift/focus unless window is briefly topmost.
+                self.log("[Tray] focus_force() called")
+            except Exception as e:
+                self.log(f"[Tray] focus_force() failed: {e}")
+                self.log(traceback.format_exc())
             try:
                 self.attributes('-topmost', True)
                 self.after(120, lambda: self.attributes('-topmost', False))
-            except Exception:
-                pass
-            # Ensure tray icon is stopped
+                self.log("[Tray] temporary -topmost toggled")
+            except Exception as e:
+                self.log(f"[Tray] topmost toggle failed: {e}")
+                self.log(traceback.format_exc())
             try:
                 self._stop_tray()
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e:
+                self.log(f"[Tray] _stop_tray() during restore failed: {e}")
+                self.log(traceback.format_exc())
+        except Exception as e:
+            self.log(f"[Tray] _restore_from_tray unexpected error: {e}")
+            self.log(traceback.format_exc())
 
     def _quit_from_tray(self):
+        self.log("[Tray] _quit_from_tray() called")
         try:
             try:
                 self._stop_tray()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[Tray] _stop_tray() during quit failed: {e}")
+                self.log(traceback.format_exc())
         finally:
             try:
+                self.log("[Tray] destroying main window")
                 self.destroy()
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[Tray] destroy() failed: {e}")
+                self.log(traceback.format_exc())
 
     def _on_iconify(self, event=None):
         # Called when window is minimized/iconified
         try:
+            self.log("[Tray] _on_iconify() event fired")
             settings = self.config.get("_settings", {})
             if settings.get("minimize_to_tray", False):
                 # hide main window and start tray
+                self.log("[Tray] minimize_to_tray enabled; withdrawing window and starting tray")
                 self.withdraw()
                 self._start_tray()
-        except Exception:
-            pass
+            else:
+                self.log("[Tray] minimize_to_tray disabled; normal iconify")
+        except Exception as e:
+            self.log(f"[Tray] _on_iconify error: {e}")
+            self.log(traceback.format_exc())
 
 
     def add_game(self):
