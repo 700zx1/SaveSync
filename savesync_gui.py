@@ -1060,19 +1060,20 @@ class SaveSyncApp(tk.Tk):
             except Exception:
                 img = None
 
-        # Define handlers with the signature pystray expects (icon, item).
-        def _on_restore(icon, item):
-            # schedule UI restore on main thread
+        # Define handlers with the signature pystray expects (icon, item for menu, icon for default).
+        def _on_restore(icon, item=None):
+            self.log(f"[Tray] Restore triggered from {'menu' if item else 'icon click'}")
             try:
                 self.after(0, self._restore_from_tray)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[!] Tray restore error: {e}")
 
         def _on_quit(icon, item):
+            self.log("[Tray] Quit triggered from menu")
             try:
                 self.after(0, self._quit_from_tray)
-            except Exception:
-                pass
+            except Exception as e:
+                self.log(f"[!] Tray quit error: {e}")
 
         try:
             menu = pystray.Menu(
@@ -1081,6 +1082,11 @@ class SaveSyncApp(tk.Tk):
             )
             icon = pystray.Icon('savesync', img, 'SaveSync', menu)
             self.tray_icon = icon
+            icon.default_action = _on_restore
+            try:
+                icon.visible = True
+            except Exception:
+                pass
         except Exception as e:
             self.log(f"[!] Failed to create tray icon: {e}")
             return
@@ -1097,6 +1103,7 @@ class SaveSyncApp(tk.Tk):
 
         self.tray_thread = threading.Thread(target=run_icon, daemon=True)
         self.tray_thread.start()
+        self.log("[Tray] Tray icon started")
 
     def _stop_tray(self):
         icon = getattr(self, 'tray_icon', None)
